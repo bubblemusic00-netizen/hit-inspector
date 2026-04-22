@@ -22,7 +22,9 @@ export default function Layout({
   // Resolve the current category label for the mobile top bar.
   const currentLabel = selected === "overview"
     ? "Overview"
-    : (CATEGORIES.find(c => c.id === selected)?.label || "");
+    : selected === "search"
+      ? "Search"
+      : (CATEGORIES.find(c => c.id === selected)?.label || "");
 
   // Lock body scroll when the drawer is open on mobile, so the main
   // content doesn't scroll behind the open drawer.
@@ -238,6 +240,11 @@ function SidebarInner({ groups, selected, onSelect, sourcePath, sourceModified }
         }}>Catalog browser</div>
       </div>
 
+      <NavItem
+        label="Search"
+        active={selected === "search"}
+        onClick={() => onSelect("search")}
+      />
       <NavItem
         label="Overview"
         active={selected === "overview"}

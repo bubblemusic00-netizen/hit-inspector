@@ -3,10 +3,20 @@ import { T } from "../theme.js";
 import { LINGUISTIC_FAMILIES, MUSIC_CONTEXT_CLUSTERS } from "../language-families.js";
 import { useIsMobile } from "../responsive.js";
 
-export default function FamilyView({ category, items, raw, derived }) {
+export default function FamilyView({
+  category, items, raw, derived,
+  preselect, onPreselectConsumed,
+}) {
   // Tree categories: render as expandable hierarchy
   if (category.shape === "tree-main") {
-    return <TreeFamily category={category} raw={raw} />;
+    return (
+      <TreeFamily
+        category={category}
+        raw={raw}
+        preselect={preselect}
+        onPreselectConsumed={onPreselectConsumed}
+      />
+    );
   }
   if (category.shape === "tree-sub" || category.shape === "tree-micro") {
     return (
@@ -38,6 +48,17 @@ export default function FamilyView({ category, items, raw, derived }) {
   const [selected, setSelected] = useState(items[0]?.id || "");
   const entry = complementData[selected];
   const isMobile = useIsMobile();
+
+  // Preselect: when a search result routes us here with a target id,
+  // select that item on mount (or whenever the preselect prop changes).
+  // Then tell the parent we consumed it so re-navigating to the same
+  // category via the sidebar doesn't keep forcing this selection.
+  useEffect(() => {
+    if (!preselect || !preselect.id) return;
+    const match = items.find(it => it.id === preselect.id);
+    if (match) setSelected(match.id);
+    onPreselectConsumed?.();
+  }, [preselect]);
   // Mobile list-detail: when user taps an item in the picker, switch to
   // detail view fullscreen with a back-to-list button. `showPicker`
   // tracks which view is active on mobile.
@@ -189,7 +210,7 @@ export default function FamilyView({ category, items, raw, derived }) {
 //   · sub selected → list of all leaves under this sub + parent crumb
 //   · leaf selected → breadcrumb + cross-references in other catalogs
 //                     (for Instruments: also SUGGESTION_MAP pairings)
-function TreeFamily({ category, raw }) {
+function TreeFamily({ category, raw, preselect, onPreselectConsumed }) {
   const data = category.fetcher(raw);
   const [expandedMain, setExpandedMain] = useState({});
   const [expandedSub, setExpandedSub] = useState({});
@@ -205,6 +226,20 @@ function TreeFamily({ category, raw }) {
       if (firstMain) setSelected({ level: "main", main: firstMain });
     }
   }, [isMobile]);
+
+  // Preselect: search-originated navigation. Set selection AND auto-expand
+  // the path (so the target is visible in the tree picker).
+  useEffect(() => {
+    if (!preselect || !preselect.level) return;
+    setSelected(preselect);
+    if (preselect.main) {
+      setExpandedMain(s => ({ ...s, [preselect.main]: true }));
+    }
+    if (preselect.sub) {
+      setExpandedSub(s => ({ ...s, [`${preselect.main}:${preselect.sub}`]: true }));
+    }
+    onPreselectConsumed?.();
+  }, [preselect]);
 
   const toggleMain = (key, e) => {
     e.stopPropagation();

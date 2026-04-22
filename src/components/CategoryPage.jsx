@@ -6,7 +6,10 @@ import ItemsView from "./ItemsView.jsx";
 import FamilyView from "./FamilyView.jsx";
 import StatsView from "./StatsView.jsx";
 
-export default function CategoryPage({ category, raw, derived, tab, onTab }) {
+export default function CategoryPage({
+  category, raw, derived, tab, onTab,
+  preselect, onPreselectConsumed,
+}) {
   const items = useMemo(
     () => flattenCategoryItems(category, raw, derived),
     [category, raw, derived]
@@ -35,7 +38,16 @@ export default function CategoryPage({ category, raw, derived, tab, onTab }) {
       </header>
 
       {tab === "items"  && <ItemsView category={category} items={items} />}
-      {tab === "family" && <FamilyView category={category} items={items} raw={raw} derived={derived} />}
+      {tab === "family" && (
+        <FamilyView
+          category={category}
+          items={items}
+          raw={raw}
+          derived={derived}
+          preselect={preselect}
+          onPreselectConsumed={onPreselectConsumed}
+        />
+      )}
       {tab === "stats"  && <StatsView category={category} items={items} raw={raw} derived={derived} />}
     </div>
   );

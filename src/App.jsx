@@ -3,6 +3,7 @@ import { T } from "./theme.js";
 import Layout from "./components/Layout.jsx";
 import CategoryPage from "./components/CategoryPage.jsx";
 import OverviewPage from "./components/OverviewPage.jsx";
+import SearchPage from "./components/SearchPage.jsx";
 import { CATEGORIES, buildDerivedData } from "./categories.js";
 
 export default function App() {
@@ -10,6 +11,9 @@ export default function App() {
   const [error, setError] = useState(null);
   const [selected, setSelected] = useState("overview");
   const [tab, setTab] = useState("items");    // "items" | "family" | "stats"
+  // preselect: optional target inside a category (e.g. preselect the
+  // Euphoric row in Moods Family). Search sets this; sidebar clears it.
+  const [preselect, setPreselect] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -40,6 +44,24 @@ export default function App() {
   // Languages, which has no family data).
   useEffect(() => { setTab("items"); }, [selected]);
 
+  // Sidebar nav → clear preselect (search-originated preselect shouldn't
+  // persist across a fresh sidebar click).
+  const handleSidebarSelect = (id) => {
+    setPreselect(null);
+    setSelected(id);
+  };
+
+  // Search result click → set category + preselect + appropriate tab.
+  // Search results from genres / instruments go to the Family tab
+  // (where the hierarchy is browsable). Flat catalogs also go to Family
+  // (so the picker preselects the matched item). Artists also route to
+  // genres → Family so you see the genre home of that artist.
+  const handleSearchResultClick = (categoryId, preselectTarget, preferredTab) => {
+    setSelected(categoryId);
+    setPreselect(preselectTarget);
+    setTab(preferredTab || "family");
+  };
+
   if (error) return <ErrorScreen error={error} />;
   if (!raw) return <LoadingScreen />;
 
@@ -48,21 +70,33 @@ export default function App() {
   let mainContent;
   if (selected === "overview") {
     mainContent = <OverviewPage raw={raw} derived={derived} />;
+  } else if (selected === "search") {
+    mainContent = <SearchPage data={raw.data} onResultClick={handleSearchResultClick} />;
   } else {
     const cat = CATEGORIES.find(c => c.id === selected);
     if (!cat) mainContent = <div style={{ padding: T.s6 }}>Unknown category.</div>;
-    else mainContent = <CategoryPage category={cat} raw={raw.data} derived={derived} tab={tab} onTab={setTab} />;
+    else mainContent = (
+      <CategoryPage
+        category={cat}
+        raw={raw.data}
+        derived={derived}
+        tab={tab}
+        onTab={setTab}
+        preselect={preselect}
+        onPreselectConsumed={() => setPreselect(null)}
+      />
+    );
   }
 
   return (
     <Layout
       selected={selected}
-      onSelect={setSelected}
+      onSelect={handleSidebarSelect}
       sourcePath={raw.sourcePath}
       sourceModified={raw.sourceModified}
       tab={tab}
       onTab={setTab}
-      showTabs={selected !== "overview"}
+      showTabs={selected !== "overview" && selected !== "search"}
     >
       {mainContent}
     </Layout>
