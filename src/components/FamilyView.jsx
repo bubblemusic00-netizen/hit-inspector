@@ -282,30 +282,167 @@ function TreeDetail({ category, data, selected, raw }) {
   );
 
   const PairingPills = ({ values }) => (
-    <div style={{ display: "flex", flexWrap: "wrap", gap: T.s1 }}>
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
       {values.map((v, i) => (
         <span key={`${v}-${i}`} style={{
-          padding: `${T.s1}px ${T.s2}px`,
-          background: T.bgCard, border: `1px solid ${T.borderHi}`,
+          padding: `5px 10px`,
+          background: T.bgSurface,
+          border: `1px solid ${T.borderHi}`,
           borderRadius: T.r_sm,
-          color: T.textSec, fontSize: 11, fontFamily: T.fontMono,
+          color: T.text,
+          fontSize: 12,
+          fontFamily: T.fontMono,
+          lineHeight: 1.3,
         }}>{v}</span>
       ))}
     </div>
   );
 
+  // Visible lineage ribbon: Main ─→ Sub ─→ [current leaf]
+  // `activeIndex` marks the terminal node that gets the accent treatment.
+  const LineagePath = ({ parts, activeIndex }) => (
+    <div style={{
+      display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap",
+      fontFamily: T.fontMono, fontSize: 12, marginBottom: T.s3,
+    }}>
+      {parts.map((p, i) => {
+        const isActive = i === activeIndex;
+        return (
+          <Fragment key={`${p}-${i}`}>
+            {i > 0 && (
+              <span style={{ color: T.textDim, letterSpacing: "0.05em" }}>─→</span>
+            )}
+            <span style={{
+              padding: isActive ? "3px 10px" : "3px 8px",
+              border: `1px solid ${isActive ? T.accent : T.border}`,
+              background: isActive ? `${T.accent}18` : "transparent",
+              color: isActive ? T.text : T.textSec,
+              borderRadius: T.r_sm,
+              fontWeight: isActive ? 600 : 400,
+            }}>{p}</span>
+          </Fragment>
+        );
+      })}
+    </div>
+  );
+
+  // Section header shared by PAIRINGS and CROSS-REFERENCES blocks.
+  // Large eyebrow label + count, with a rule beneath that carries the
+  // accent the user already associates with active selections.
+  const SectionHeader = ({ label, count, countLabel }) => (
+    <div style={{ margin: `${T.s6}px 0 ${T.s4}px` }}>
+      <div style={{
+        display: "flex", alignItems: "baseline", gap: T.s3,
+        marginBottom: T.s2,
+      }}>
+        <span style={{
+          fontFamily: T.fontMono, fontSize: 11, fontWeight: 700,
+          color: T.text, letterSpacing: "0.2em", textTransform: "uppercase",
+        }}>{label}</span>
+        {count != null && (
+          <span style={{
+            fontFamily: T.fontMono, fontSize: 11,
+            color: T.textMuted, letterSpacing: "0.1em",
+          }}>· {count} {countLabel || (count === 1 ? "field" : "fields")}</span>
+        )}
+      </div>
+      <div style={{
+        height: 1,
+        background: `linear-gradient(90deg, ${T.accent} 0%, ${T.accent}44 50px, ${T.border} 200px)`,
+      }} />
+    </div>
+  );
+
+  // BPM range visualization: two end-dots on an accent bar, numeric
+  // readouts above. Communicates that BPM is a range, not a single pick.
+  const BpmRange = ({ lo, hi }) => (
+    <div style={{
+      display: "flex", alignItems: "center", gap: T.s3, flexWrap: "wrap",
+    }}>
+      <div style={{ width: 260, maxWidth: "100%" }}>
+        <div style={{
+          position: "relative", display: "flex", justifyContent: "space-between",
+          fontFamily: T.fontMono, fontSize: 13, fontWeight: 600, color: T.text,
+          marginBottom: 6,
+        }}>
+          <span>{lo}</span>
+          <span>{hi}</span>
+        </div>
+        <div style={{ position: "relative", height: 10 }}>
+          <div style={{
+            position: "absolute", left: 5, right: 5, top: 4, height: 2,
+            background: T.accent, borderRadius: 1,
+          }} />
+          <div style={{
+            position: "absolute", left: 0, top: 0, width: 10, height: 10,
+            borderRadius: "50%", background: T.accent,
+            boxShadow: `0 0 0 2px ${T.bg}`,
+          }} />
+          <div style={{
+            position: "absolute", right: 0, top: 0, width: 10, height: 10,
+            borderRadius: "50%", background: T.accent,
+            boxShadow: `0 0 0 2px ${T.bg}`,
+          }} />
+        </div>
+      </div>
+      <span style={{
+        fontFamily: T.fontMono, fontSize: 11, letterSpacing: "0.2em",
+        color: T.textMuted, textTransform: "uppercase",
+      }}>BPM</span>
+    </div>
+  );
+
+  // Source badge: shows where the pairings were resolved from. When
+  // exact (leaf/sub/main matched its own entry), the badge is a calm
+  // muted "exact match". When inherited, it calls out the parent.
+  const SourceBadge = ({ isExact, matchedKey, sourceLevelLabel }) => {
+    if (isExact) {
+      return (
+        <span style={{
+          display: "inline-flex", alignItems: "center", gap: 6,
+          padding: "3px 10px",
+          background: `${T.success}12`,
+          border: `1px solid ${T.success}44`,
+          borderRadius: T.r_sm,
+          fontFamily: T.fontMono, fontSize: 11,
+          color: T.success, letterSpacing: "0.08em",
+        }}>
+          <span style={{
+            display: "inline-block", width: 6, height: 6, borderRadius: "50%",
+            background: T.success,
+          }} />
+          EXACT MATCH
+        </span>
+      );
+    }
+    return (
+      <span style={{
+        display: "inline-flex", alignItems: "center", gap: 8,
+        padding: "3px 10px",
+        background: `${T.info}12`,
+        border: `1px solid ${T.info}55`,
+        borderRadius: T.r_sm,
+        fontFamily: T.fontMono, fontSize: 11,
+        color: T.textSec, letterSpacing: "0.02em",
+      }}>
+        <span style={{
+          color: T.info, fontWeight: 700, letterSpacing: "0.12em",
+        }}>INHERITED FROM</span>
+        <span style={{ color: T.text, fontWeight: 600 }}>"{matchedKey}"</span>
+        <span style={{ color: T.textMuted }}>· {sourceLevelLabel}</span>
+      </span>
+    );
+  };
+
   // ── GenrePairings component: resolves GENRE_INTUITION data via
-  // inheritance (exact match → parent walk → default) and renders the
-  // same pairings-by-field block as Vocalists/Moods. When the resolved
-  // entry is INHERITED from a parent (not the exact selected item), an
-  // explicit notice is shown above the pairings so the user knows the
-  // data isn't unique to the selected item.
-  const GenrePairings = ({ main, sub, leaf }) => {
+  // inheritance (exact match → parent walk → default) and renders a
+  // structured pairings block. Inheritance metadata (isExact,
+  // matchedKey, sourceLevelLabel) is exposed via the optional
+  // `onResolve` callback so the outer hero shell can render the
+  // source badge in its meta row (rather than a loud warning inline).
+  const GenrePairings = ({ main, sub, leaf, onResolve, hideHeading }) => {
     if (category.id !== "genres") return null;
     const intuition = raw.GENRE_INTUITION || {};
-    // Candidates in specificity order. The first is the "target" the
-    // user is viewing. levelNames runs in lockstep so we can report
-    // which level the fallback landed on.
     const candidates = [leaf, sub, main, "default"].filter(Boolean);
     if (candidates.length === 0) return null;
     const target = candidates[0];
@@ -331,38 +468,29 @@ function TreeDetail({ category, data, selected, raw }) {
         break;
       }
     }
-    if (!resolved) return null;
+    if (!resolved) { if (onResolve) onResolve(null); return null; }
 
-    // Exact = the resolved key is the same entity as the target (case-insensitive).
     const isExact = String(target).toLowerCase() === matchedKey.toLowerCase();
-
-    // Build a human description of the inheritance source.
-    const targetLevelLabel = leaf ? "micro-style" : sub ? "sub-genre" : "main genre";
     const sourceLevelLabel =
-      matchedLevel === "sub"  ? "parent sub-genre" :
-      matchedLevel === "main" ? "parent main genre" :
+      matchedLevel === "sub"     ? "parent sub-genre"       :
+      matchedLevel === "main"    ? "parent main genre"      :
       matchedLevel === "default" ? "system default fallback" :
       "exact match";
+    if (onResolve) onResolve({ isExact, matchedKey, sourceLevelLabel });
 
-    // Map GENRE_INTUITION field names to the display labels used in the
-    // rest of the inspector (match Vocalists/Moods Family format).
     const FIELD_ORDER = [
-      { key: "moods",      label: "MOOD" },
-      { key: "grooves",    label: "GROOVE" },
-      { key: "energies",   label: "ENERGY" },
-      { key: "harmonics",  label: "HARMONIC" },
-      { key: "textures",   label: "TEXTURE" },
-      { key: "mixes",      label: "MIX" },
+      { key: "moods",              label: "MOOD" },
+      { key: "grooves",            label: "GROOVE" },
+      { key: "energies",           label: "ENERGY" },
+      { key: "harmonics",          label: "HARMONIC" },
+      { key: "textures",           label: "TEXTURE" },
+      { key: "mixes",              label: "MIX" },
       { key: "instrumentKeywords", label: "INSTRUMENT KEYWORDS" },
     ];
-    // BPM range is a tuple [lo, hi] — render as a single pill.
     const bpm = Array.isArray(resolved.bpmRange) && resolved.bpmRange.length === 2
-      ? `${resolved.bpmRange[0]}-${resolved.bpmRange[1]} BPM`
+      ? resolved.bpmRange
       : null;
 
-    // De-dupe arrays (GENRE_INTUITION has intentional duplicates for
-    // weighting — e.g. "straight" appears 3x to bias picks toward it —
-    // but the inspector shows unique values).
     const dedupe = arr => {
       const seen = new Set();
       const out = [];
@@ -372,56 +500,38 @@ function TreeDetail({ category, data, selected, raw }) {
       return out;
     };
 
+    // Count the populated fields (BPM + each FIELD_ORDER that has values).
+    const populatedFields = FIELD_ORDER.filter(f => dedupe(resolved[f.key]).length > 0);
+    const totalFieldCount = populatedFields.length + (bpm ? 1 : 0);
+
     return (
-      <div style={{ marginBottom: T.s5 }}>
-        <div style={{
-          fontFamily: T.fontSans, fontSize: 16, fontWeight: 600, color: T.text,
-          marginBottom: T.s3,
-        }}>
-          Pairings for <span style={{ color: T.accent }}>{leaf || sub || main}</span>
-        </div>
-        {!isExact && (
-          <div style={{
-            padding: `${T.s2}px ${T.s3}px`,
-            marginBottom: T.s3,
-            background: T.bgCard,
-            border: `1px solid ${T.warning}`,
-            borderLeft: `3px solid ${T.warning}`,
-            borderRadius: T.r_sm,
-            fontFamily: T.fontSans, fontSize: 12,
-            lineHeight: 1.55,
-          }}>
-            <div style={{
-              fontFamily: T.fontMono, fontSize: 9, color: T.warning,
-              letterSpacing: "0.2em", textTransform: "uppercase",
-              marginBottom: 2, fontWeight: 700,
-            }}>Inherited pairings</div>
-            <div style={{ color: T.textSec }}>
-              This {targetLevelLabel} has no own entry in{" "}
-              <code style={{ color: T.info, fontFamily: T.fontMono }}>GENRE_INTUITION</code>.
-              {" "}Showing data inherited from {sourceLevelLabel}{" "}
-              <span style={{ color: T.text, fontFamily: T.fontMono }}>"{matchedKey}"</span>.
-            </div>
-          </div>
-        )}
+      <div>
+        {!hideHeading && <SectionHeader label="Pairings" count={totalFieldCount} />}
         {bpm && (
-          <div style={{ marginBottom: T.s3 }}>
+          <div style={{ marginBottom: T.s5 }}>
             <div style={{
               fontFamily: T.fontMono, fontSize: 10, color: T.textMuted,
-              letterSpacing: "0.2em", textTransform: "uppercase", marginBottom: T.s1,
+              letterSpacing: "0.22em", textTransform: "uppercase", marginBottom: T.s2,
             }}>TEMPO</div>
-            <PairingPills values={[bpm]} />
+            <BpmRange lo={bpm[0]} hi={bpm[1]} />
           </div>
         )}
-        {FIELD_ORDER.map(({ key, label }) => {
+        {populatedFields.map(({ key, label }) => {
           const values = dedupe(resolved[key]);
-          if (!values.length) return null;
           return (
-            <div key={key} style={{ marginBottom: T.s3 }}>
+            <div key={key} style={{ marginBottom: T.s4 }}>
               <div style={{
-                fontFamily: T.fontMono, fontSize: 10, color: T.textMuted,
-                letterSpacing: "0.2em", textTransform: "uppercase", marginBottom: T.s1,
-              }}>{label}</div>
+                display: "flex", alignItems: "baseline", gap: T.s2,
+                marginBottom: T.s2,
+              }}>
+                <span style={{
+                  fontFamily: T.fontMono, fontSize: 10, color: T.textMuted,
+                  letterSpacing: "0.22em", textTransform: "uppercase", fontWeight: 600,
+                }}>{label}</span>
+                <span style={{
+                  fontFamily: T.fontMono, fontSize: 10, color: T.textDim,
+                }}>· {values.length}</span>
+              </div>
               <PairingPills values={values} />
             </div>
           );
@@ -550,22 +660,83 @@ function TreeDetail({ category, data, selected, raw }) {
   if (selected.level === "leaf") {
     const isInstruments = category.id === "instruments";
     const leaf = selected.leaf;
+    const isGenre = category.id === "genres";
+    // We need the pairing resolution metadata BEFORE GenrePairings
+    // renders, so we run the same resolver once here and pass
+    // `hideHeading` when we embed the component below (the hero already
+    // carries the source badge). This keeps the single source of truth
+    // inside GenrePairings — we just peek at its output.
+    let resolutionInfo = null;
+    if (isGenre) {
+      const intuition = raw.GENRE_INTUITION || {};
+      const candidates = [leaf, selected.sub, selected.main, "default"].filter(Boolean);
+      const levelNames = ["leaf", "sub", "main", "default"];
+      const lowerKeys = {};
+      for (const k of Object.keys(intuition)) lowerKeys[k.toLowerCase()] = k;
+      for (let i = 0; i < candidates.length; i++) {
+        const k = lowerKeys[String(candidates[i]).toLowerCase()];
+        if (k && intuition[k]) {
+          const isExact = String(leaf).toLowerCase() === k.toLowerCase();
+          const matchedLevel = levelNames[i];
+          const sourceLevelLabel =
+            matchedLevel === "sub"     ? "parent sub-genre"       :
+            matchedLevel === "main"    ? "parent main genre"      :
+            matchedLevel === "default" ? "system default fallback" :
+            "exact match";
+          resolutionInfo = { isExact, matchedKey: k, sourceLevelLabel };
+          break;
+        }
+      }
+    }
+
     return (
       <div>
-        <Breadcrumb parts={[selected.main, selected.sub, leaf]} />
+        {/* ═══ HERO ═══ */}
         <div style={{
-          fontFamily: T.fontSans, fontSize: 20, fontWeight: 600, color: T.text,
-          marginBottom: T.s3,
-        }}>{leaf}</div>
-        <div style={{
-          fontFamily: T.fontMono, fontSize: 11, color: T.textSec,
-          marginBottom: T.s4,
+          paddingBottom: T.s5,
+          marginBottom: T.s2,
+          borderBottom: `1px solid ${T.border}`,
         }}>
-          {isInstruments ? "Articulation variant" : "Micro-style"}
-          {" · "}
-          <span style={{ color: T.textMuted }}>{selected.main} → {selected.sub}</span>
+          <LineagePath parts={[selected.main, selected.sub, leaf]} activeIndex={2} />
+          <h1 style={{
+            margin: 0,
+            fontFamily: T.fontSans,
+            fontSize: 40,
+            fontWeight: 700,
+            letterSpacing: "-0.025em",
+            lineHeight: 1.08,
+            color: T.text,
+          }}>{leaf}</h1>
+          <div style={{
+            display: "flex", alignItems: "center", gap: T.s3,
+            marginTop: T.s3, flexWrap: "wrap",
+          }}>
+            <span style={{
+              padding: "3px 10px",
+              border: `1px solid ${T.border}`,
+              borderRadius: T.r_sm,
+              fontFamily: T.fontMono, fontSize: 11,
+              color: T.textSec, letterSpacing: "0.12em",
+              textTransform: "uppercase",
+            }}>
+              {isInstruments ? "Articulation" : "Micro-style"}
+            </span>
+            {resolutionInfo && (
+              <SourceBadge
+                isExact={resolutionInfo.isExact}
+                matchedKey={resolutionInfo.matchedKey}
+                sourceLevelLabel={resolutionInfo.sourceLevelLabel}
+              />
+            )}
+          </div>
         </div>
-        <GenrePairings main={selected.main} sub={selected.sub} leaf={leaf} />
+
+        {/* ═══ PAIRINGS ═══ */}
+        {isGenre && (
+          <GenrePairings main={selected.main} sub={selected.sub} leaf={leaf} />
+        )}
+
+        {/* ═══ CROSS-REFERENCES ═══ */}
         <CrossRefs value={leaf} raw={raw} isLeaf />
       </div>
     );
@@ -631,36 +802,83 @@ function CrossRefs({ value, raw, isLeaf }) {
 
   if (hits.length === 0) {
     return (
-      <div style={{
-        padding: T.s4,
-        background: T.bgCard, border: `1px solid ${T.border}`, borderRadius: T.r_md,
-        color: T.textMuted, fontSize: 12, fontFamily: T.fontSans,
-      }}>
-        No other catalogs reference <span style={{ color: T.textSec, fontFamily: T.fontMono }}>"{value}"</span>.
-        This is a leaf value only used in its parent tree.
+      <div>
+        <div style={{ margin: `${T.s6}px 0 ${T.s4}px` }}>
+          <div style={{
+            display: "flex", alignItems: "baseline", gap: T.s3,
+            marginBottom: T.s2,
+          }}>
+            <span style={{
+              fontFamily: T.fontMono, fontSize: 11, fontWeight: 700,
+              color: T.text, letterSpacing: "0.2em", textTransform: "uppercase",
+            }}>Cross-references</span>
+            <span style={{
+              fontFamily: T.fontMono, fontSize: 11,
+              color: T.textMuted, letterSpacing: "0.1em",
+            }}>· 0 tables</span>
+          </div>
+          <div style={{
+            height: 1,
+            background: `linear-gradient(90deg, ${T.accent} 0%, ${T.accent}44 50px, ${T.border} 200px)`,
+          }} />
+        </div>
+        <div style={{
+          padding: T.s4,
+          background: T.bgCard, border: `1px solid ${T.border}`, borderRadius: T.r_md,
+          color: T.textMuted, fontSize: 12, fontFamily: T.fontSans,
+        }}>
+          No other catalogs reference <span style={{ color: T.textSec, fontFamily: T.fontMono }}>"{value}"</span>.
+          This is a leaf value only used in its parent tree.
+        </div>
       </div>
     );
   }
 
+  const totalHits = hits.reduce((n, h) => n + h.items.length, 0);
+
   return (
     <div>
-      <div style={{
-        fontFamily: T.fontMono, fontSize: 10, color: T.textMuted,
-        letterSpacing: "0.2em", textTransform: "uppercase", marginBottom: T.s2,
-      }}>Referenced in</div>
+      <div style={{ margin: `${T.s6}px 0 ${T.s4}px` }}>
+        <div style={{
+          display: "flex", alignItems: "baseline", gap: T.s3,
+          marginBottom: T.s2,
+        }}>
+          <span style={{
+            fontFamily: T.fontMono, fontSize: 11, fontWeight: 700,
+            color: T.text, letterSpacing: "0.2em", textTransform: "uppercase",
+          }}>Cross-references</span>
+          <span style={{
+            fontFamily: T.fontMono, fontSize: 11,
+            color: T.textMuted, letterSpacing: "0.1em",
+          }}>· {hits.length} {hits.length === 1 ? "source" : "sources"} · {totalHits} {totalHits === 1 ? "hit" : "hits"}</span>
+        </div>
+        <div style={{
+          height: 1,
+          background: `linear-gradient(90deg, ${T.accent} 0%, ${T.accent}44 50px, ${T.border} 200px)`,
+        }} />
+      </div>
       {hits.map(({ source, items }) => (
-        <div key={source} style={{ marginBottom: T.s3 }}>
+        <div key={source} style={{ marginBottom: T.s4 }}>
           <div style={{
-            fontFamily: T.fontMono, fontSize: 11, color: T.info,
-            marginBottom: T.s1,
-          }}>{source}</div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: T.s1 }}>
+            display: "flex", alignItems: "baseline", gap: T.s2,
+            marginBottom: T.s2,
+          }}>
+            <span style={{
+              fontFamily: T.fontMono, fontSize: 10, fontWeight: 600,
+              color: T.info, letterSpacing: "0.18em", textTransform: "uppercase",
+            }}>{source}</span>
+            <span style={{
+              fontFamily: T.fontMono, fontSize: 10, color: T.textDim,
+            }}>· {items.length}</span>
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
             {items.map(item => (
               <span key={item} style={{
-                padding: `${T.s1}px ${T.s2}px`,
-                background: T.bgCard, border: `1px solid ${T.borderHi}`,
+                padding: `5px 10px`,
+                background: T.bgSurface, border: `1px solid ${T.borderHi}`,
                 borderRadius: T.r_sm,
-                color: T.textSec, fontSize: 11, fontFamily: T.fontMono,
+                color: T.text, fontSize: 12, fontFamily: T.fontMono,
+                lineHeight: 1.3,
               }}>{item}</span>
             ))}
           </div>
