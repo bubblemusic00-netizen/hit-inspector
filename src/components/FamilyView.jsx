@@ -296,26 +296,53 @@ function TreeDetail({ category, data, selected, raw }) {
 
   // ── GenrePairings component: resolves GENRE_INTUITION data via
   // inheritance (exact match → parent walk → default) and renders the
-  // same pairings-by-field block as Vocalists/Moods. No inheritance
-  // label per user spec — the user just sees populated data as if
-  // each genre has its own curated pairings.
+  // same pairings-by-field block as Vocalists/Moods. When the resolved
+  // entry is INHERITED from a parent (not the exact selected item), an
+  // explicit notice is shown above the pairings so the user knows the
+  // data isn't unique to the selected item.
   const GenrePairings = ({ main, sub, leaf }) => {
     if (category.id !== "genres") return null;
     const intuition = raw.GENRE_INTUITION || {};
-    // Case-insensitive candidate keys in specificity order.
-    // Example when leaf-selected: ["afro-soul crossover", "afro r&b", "r&b / soul", "default"]
+    // Candidates in specificity order. The first is the "target" the
+    // user is viewing. levelNames runs in lockstep so we can report
+    // which level the fallback landed on.
     const candidates = [leaf, sub, main, "default"].filter(Boolean);
-    let resolved = null;
+    if (candidates.length === 0) return null;
+    const target = candidates[0];
+    const levelNames = leaf
+      ? ["leaf", "sub", "main", "default"]
+      : sub
+        ? ["sub", "main", "default"]
+        : ["main", "default"];
+
     const lowerIntuitionKeys = {};
     for (const k of Object.keys(intuition)) lowerIntuitionKeys[k.toLowerCase()] = k;
-    for (const c of candidates) {
+
+    let resolved = null;
+    let matchedKey = null;
+    let matchedLevel = null;
+    for (let i = 0; i < candidates.length; i++) {
+      const c = candidates[i];
       const key = lowerIntuitionKeys[String(c).toLowerCase()];
       if (key && intuition[key]) {
         resolved = intuition[key];
+        matchedKey = key;
+        matchedLevel = levelNames[i];
         break;
       }
     }
     if (!resolved) return null;
+
+    // Exact = the resolved key is the same entity as the target (case-insensitive).
+    const isExact = String(target).toLowerCase() === matchedKey.toLowerCase();
+
+    // Build a human description of the inheritance source.
+    const targetLevelLabel = leaf ? "micro-style" : sub ? "sub-genre" : "main genre";
+    const sourceLevelLabel =
+      matchedLevel === "sub"  ? "parent sub-genre" :
+      matchedLevel === "main" ? "parent main genre" :
+      matchedLevel === "default" ? "system default fallback" :
+      "exact match";
 
     // Map GENRE_INTUITION field names to the display labels used in the
     // rest of the inspector (match Vocalists/Moods Family format).
@@ -353,6 +380,30 @@ function TreeDetail({ category, data, selected, raw }) {
         }}>
           Pairings for <span style={{ color: T.accent }}>{leaf || sub || main}</span>
         </div>
+        {!isExact && (
+          <div style={{
+            padding: `${T.s2}px ${T.s3}px`,
+            marginBottom: T.s3,
+            background: T.bgCard,
+            border: `1px solid ${T.warning}`,
+            borderLeft: `3px solid ${T.warning}`,
+            borderRadius: T.r_sm,
+            fontFamily: T.fontSans, fontSize: 12,
+            lineHeight: 1.55,
+          }}>
+            <div style={{
+              fontFamily: T.fontMono, fontSize: 9, color: T.warning,
+              letterSpacing: "0.2em", textTransform: "uppercase",
+              marginBottom: 2, fontWeight: 700,
+            }}>Inherited pairings</div>
+            <div style={{ color: T.textSec }}>
+              This {targetLevelLabel} has no own entry in{" "}
+              <code style={{ color: T.info, fontFamily: T.fontMono }}>GENRE_INTUITION</code>.
+              {" "}Showing data inherited from {sourceLevelLabel}{" "}
+              <span style={{ color: T.text, fontFamily: T.fontMono }}>"{matchedKey}"</span>.
+            </div>
+          </div>
+        )}
         {bpm && (
           <div style={{ marginBottom: T.s3 }}>
             <div style={{
