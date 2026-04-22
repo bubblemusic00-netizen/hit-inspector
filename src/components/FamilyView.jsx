@@ -294,6 +294,91 @@ function TreeDetail({ category, data, selected, raw }) {
     </div>
   );
 
+  // ── GenrePairings component: resolves GENRE_INTUITION data via
+  // inheritance (exact match → parent walk → default) and renders the
+  // same pairings-by-field block as Vocalists/Moods. No inheritance
+  // label per user spec — the user just sees populated data as if
+  // each genre has its own curated pairings.
+  const GenrePairings = ({ main, sub, leaf }) => {
+    if (category.id !== "genres") return null;
+    const intuition = raw.GENRE_INTUITION || {};
+    // Case-insensitive candidate keys in specificity order.
+    // Example when leaf-selected: ["afro-soul crossover", "afro r&b", "r&b / soul", "default"]
+    const candidates = [leaf, sub, main, "default"].filter(Boolean);
+    let resolved = null;
+    const lowerIntuitionKeys = {};
+    for (const k of Object.keys(intuition)) lowerIntuitionKeys[k.toLowerCase()] = k;
+    for (const c of candidates) {
+      const key = lowerIntuitionKeys[String(c).toLowerCase()];
+      if (key && intuition[key]) {
+        resolved = intuition[key];
+        break;
+      }
+    }
+    if (!resolved) return null;
+
+    // Map GENRE_INTUITION field names to the display labels used in the
+    // rest of the inspector (match Vocalists/Moods Family format).
+    const FIELD_ORDER = [
+      { key: "moods",      label: "MOOD" },
+      { key: "grooves",    label: "GROOVE" },
+      { key: "energies",   label: "ENERGY" },
+      { key: "harmonics",  label: "HARMONIC" },
+      { key: "textures",   label: "TEXTURE" },
+      { key: "mixes",      label: "MIX" },
+      { key: "instrumentKeywords", label: "INSTRUMENT KEYWORDS" },
+    ];
+    // BPM range is a tuple [lo, hi] — render as a single pill.
+    const bpm = Array.isArray(resolved.bpmRange) && resolved.bpmRange.length === 2
+      ? `${resolved.bpmRange[0]}-${resolved.bpmRange[1]} BPM`
+      : null;
+
+    // De-dupe arrays (GENRE_INTUITION has intentional duplicates for
+    // weighting — e.g. "straight" appears 3x to bias picks toward it —
+    // but the inspector shows unique values).
+    const dedupe = arr => {
+      const seen = new Set();
+      const out = [];
+      for (const v of (arr || [])) {
+        if (!seen.has(v)) { seen.add(v); out.push(v); }
+      }
+      return out;
+    };
+
+    return (
+      <div style={{ marginBottom: T.s5 }}>
+        <div style={{
+          fontFamily: T.fontSans, fontSize: 16, fontWeight: 600, color: T.text,
+          marginBottom: T.s3,
+        }}>
+          Pairings for <span style={{ color: T.accent }}>{leaf || sub || main}</span>
+        </div>
+        {bpm && (
+          <div style={{ marginBottom: T.s3 }}>
+            <div style={{
+              fontFamily: T.fontMono, fontSize: 10, color: T.textMuted,
+              letterSpacing: "0.2em", textTransform: "uppercase", marginBottom: T.s1,
+            }}>TEMPO</div>
+            <PairingPills values={[bpm]} />
+          </div>
+        )}
+        {FIELD_ORDER.map(({ key, label }) => {
+          const values = dedupe(resolved[key]);
+          if (!values.length) return null;
+          return (
+            <div key={key} style={{ marginBottom: T.s3 }}>
+              <div style={{
+                fontFamily: T.fontMono, fontSize: 10, color: T.textMuted,
+                letterSpacing: "0.2em", textTransform: "uppercase", marginBottom: T.s1,
+              }}>{label}</div>
+              <PairingPills values={values} />
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
   // ── MAIN selected: show summary + list of sub-categories ──
   if (selected.level === "main") {
     const subs = data[selected.main] || {};
@@ -310,6 +395,7 @@ function TreeDetail({ category, data, selected, raw }) {
           <StatPill label={subLabel(category)} value={subEntries.length} />
           <StatPill label={leafLabel(category)} value={totalLeaves} />
         </div>
+        <GenrePairings main={selected.main} />
         <div style={{
           fontFamily: T.fontMono, fontSize: 10, color: T.textMuted,
           letterSpacing: "0.2em", textTransform: "uppercase", marginBottom: T.s2,
@@ -359,6 +445,8 @@ function TreeDetail({ category, data, selected, raw }) {
             />
           )}
         </div>
+
+        <GenrePairings main={selected.main} sub={selected.sub} />
 
         {/* Instruments show pairings FIRST (primary info), articulations
             second. Genres / other trees skip the pairings section. */}
@@ -426,6 +514,7 @@ function TreeDetail({ category, data, selected, raw }) {
           {" · "}
           <span style={{ color: T.textMuted }}>{selected.main} → {selected.sub}</span>
         </div>
+        <GenrePairings main={selected.main} sub={selected.sub} leaf={leaf} />
         <CrossRefs value={leaf} raw={raw} isLeaf />
       </div>
     );
