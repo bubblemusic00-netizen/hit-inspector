@@ -1,10 +1,13 @@
 import React from "react";
 import { T } from "../theme.js";
+import { LINGUISTIC_FAMILIES, MUSIC_CONTEXT_CLUSTERS } from "../language-families.js";
+import { useIsMobile } from "../responsive.js";
 
 export default function StatsView({ category, items, raw, derived }) {
+  const isMobile = useIsMobile();
   // Tree categories: show a different stats layout — sub/micro counts per main
   if (category.shape === "tree-main") {
-    return <TreeStats category={category} items={items} />;
+    return <TreeStats category={category} items={items} isMobile={isMobile} />;
   }
   if (category.shape === "tree-sub" || category.shape === "tree-micro") {
     return (
@@ -17,6 +20,12 @@ export default function StatsView({ category, items, raw, derived }) {
 
   if (items.length === 0) {
     return <div style={{ color: T.textMuted, fontFamily: T.fontSans }}>No items.</div>;
+  }
+
+  // Languages: no complement table to measure, but we CAN show
+  // distribution across the two taxonomies defined in language-families.js
+  if (category.id === "languages") {
+    return <LanguageStats items={items} />;
   }
 
   // Flat category stats
@@ -64,7 +73,8 @@ export default function StatsView({ category, items, raw, derived }) {
               const color = T.palette[i % T.palette.length];
               return (
                 <div key={it.id} style={{
-                  display: "grid", gridTemplateColumns: "200px 1fr 50px",
+                  display: "grid",
+                  gridTemplateColumns: isMobile ? "130px 1fr 40px" : "200px 1fr 50px",
                   alignItems: "center", gap: T.s3,
                   padding: `${T.s1}px 0`,
                 }}>
@@ -118,7 +128,7 @@ function StatCard({ label, value, tint }) {
   );
 }
 
-function TreeStats({ category, items }) {
+function TreeStats({ category, items, isMobile }) {
   const total = items.length;
   const totalSubs = items.reduce((a, it) => a + (it.meta?.subCount || 0), 0);
   const totalMicros = items.reduce((a, it) => a + (it.meta?.microCount || 0), 0);
@@ -156,7 +166,8 @@ function TreeStats({ category, items }) {
             const color = T.palette[i % T.palette.length];
             return (
               <div key={it.id} style={{
-                display: "grid", gridTemplateColumns: "200px 1fr 50px",
+                display: "grid",
+                gridTemplateColumns: isMobile ? "130px 1fr 40px" : "200px 1fr 50px",
                 alignItems: "center", gap: T.s3,
                 padding: `${T.s1}px 0`,
               }}>
@@ -181,6 +192,110 @@ function TreeStats({ category, items }) {
             );
           })}
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Languages stats — distribution across both taxonomies. No cross-ref
+// data (languages don't have complement tables), so show group sizes
+// instead as the primary signal.
+// ═══════════════════════════════════════════════════════════════════════
+function LanguageStats({ items }) {
+  // Count languages per group in each taxonomy
+  const countGroup = (groups) => {
+    const codes = new Set(items.map(it => it.id));
+    const result = [];
+    let placed = 0;
+    for (const [name, groupCodes] of Object.entries(groups)) {
+      const hit = groupCodes.filter(c => codes.has(c));
+      if (hit.length > 0) {
+        result.push({ name, count: hit.length });
+        placed += hit.length;
+      }
+    }
+    const uncategorized = items.length - placed;
+    if (uncategorized > 0) result.push({ name: "Uncategorized", count: uncategorized, isWarning: true });
+    return result;
+  };
+
+  const linguistic = countGroup(LINGUISTIC_FAMILIES);
+  const music = countGroup(MUSIC_CONTEXT_CLUSTERS);
+  const linguisticMax = Math.max(...linguistic.map(g => g.count));
+  const musicMax = Math.max(...music.map(g => g.count));
+
+  return (
+    <div>
+      {/* Summary cards */}
+      <div style={{
+        display: "grid",
+        gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+        gap: T.s3, marginBottom: T.s5,
+      }}>
+        <StatCard label="Total languages"   value={items.length} />
+        <StatCard label="Linguistic groups" value={linguistic.filter(g => !g.isWarning).length} />
+        <StatCard label="Music-context groups" value={music.filter(g => !g.isWarning).length} />
+      </div>
+
+      {/* Two side-by-side bar charts */}
+      <div style={{
+        display: "grid",
+        gridTemplateColumns: "repeat(auto-fit, minmax(340px, 1fr))",
+        gap: T.s4,
+      }}>
+        <GroupChart title="Linguistic families"    groups={linguistic} max={linguisticMax} />
+        <GroupChart title="Music-context clusters" groups={music}      max={musicMax} />
+      </div>
+    </div>
+  );
+}
+
+function GroupChart({ title, groups, max }) {
+  return (
+    <div>
+      <div style={{
+        fontFamily: T.fontMono, fontSize: 10,
+        color: T.textMuted, letterSpacing: "0.2em",
+        textTransform: "uppercase", marginBottom: T.s3,
+      }}>{title}</div>
+      <div style={{
+        background: T.bgCard,
+        border: `1px solid ${T.border}`,
+        borderRadius: T.r_md,
+        padding: T.s3,
+      }}>
+        {groups.map((g, i) => {
+          const pct = max > 0 ? (g.count / max) * 100 : 0;
+          const color = g.isWarning ? T.warning : T.palette[i % T.palette.length];
+          return (
+            <div key={g.name} style={{
+              display: "grid",
+              gridTemplateColumns: "1fr 80px 32px",
+              alignItems: "center", gap: T.s3,
+              padding: `${T.s1}px 0`,
+            }}>
+              <div style={{
+                color: g.isWarning ? T.warning : T.text,
+                fontSize: 12, fontFamily: T.fontSans,
+                overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+              }}>{g.name}</div>
+              <div style={{
+                position: "relative", height: 14, background: T.bg,
+                borderRadius: T.r_sm, overflow: "hidden",
+              }}>
+                <div style={{
+                  position: "absolute", left: 0, top: 0, bottom: 0,
+                  width: `${pct}%`, background: color, opacity: 0.6,
+                }} />
+              </div>
+              <div style={{
+                textAlign: "right", color: T.textSec,
+                fontFamily: T.fontMono, fontSize: 12,
+              }}>{g.count}</div>
+            </div>
+          );
+        })}
       </div>
     </div>
   );

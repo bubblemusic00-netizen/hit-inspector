@@ -1,9 +1,11 @@
 import React, { useState } from "react";
 import { T } from "../theme.js";
+import { useIsMobile } from "../responsive.js";
 
 export default function ItemsView({ category, items }) {
   const [sort, setSort] = useState("xref-desc");
   const [filter, setFilter] = useState("");
+  const isMobile = useIsMobile();
 
   const filtered = items.filter(it =>
     !filter || it.label.toLowerCase().includes(filter.toLowerCase())
@@ -34,9 +36,10 @@ export default function ItemsView({ category, items }) {
           placeholder="Filter…"
           style={{
             flex: "1 1 200px", minWidth: 150,
-            padding: `${T.s2}px ${T.s3}px`,
+            padding: isMobile ? `${T.s3}px ${T.s3}px` : `${T.s2}px ${T.s3}px`,
             background: T.bgCard, border: `1px solid ${T.border}`, borderRadius: T.r_sm,
-            color: T.text, fontFamily: T.fontSans, fontSize: 13,
+            color: T.text, fontFamily: T.fontSans,
+            fontSize: isMobile ? 16 : 13,
             outline: "none",
           }}
         />
@@ -44,9 +47,11 @@ export default function ItemsView({ category, items }) {
           value={sort}
           onChange={e => setSort(e.target.value)}
           style={{
-            padding: `${T.s2}px ${T.s3}px`,
+            padding: isMobile ? `${T.s3}px ${T.s3}px` : `${T.s2}px ${T.s3}px`,
             background: T.bgCard, border: `1px solid ${T.border}`, borderRadius: T.r_sm,
-            color: T.text, fontFamily: T.fontSans, fontSize: 13, cursor: "pointer",
+            color: T.text, fontFamily: T.fontSans,
+            fontSize: isMobile ? 16 : 13,
+            cursor: "pointer",
           }}
         >
           {showXref && <option value="xref-desc">Sort: Most referenced</option>}

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, Fragment } from "react";
 import { T } from "../theme.js";
 import { LINGUISTIC_FAMILIES, MUSIC_CONTEXT_CLUSTERS } from "../language-families.js";
+import { useIsMobile } from "../responsive.js";
 
 export default function FamilyView({ category, items, raw, derived }) {
   // Tree categories: render as expandable hierarchy
@@ -36,78 +37,146 @@ export default function FamilyView({ category, items, raw, derived }) {
   const complementData = raw[category.complementTable] || {};
   const [selected, setSelected] = useState(items[0]?.id || "");
   const entry = complementData[selected];
+  const isMobile = useIsMobile();
+  // Mobile list-detail: when user taps an item in the picker, switch to
+  // detail view fullscreen with a back-to-list button. `showPicker`
+  // tracks which view is active on mobile.
+  const [showPicker, setShowPicker] = useState(false);
 
-  return (
-    <div style={{ display: "grid", gridTemplateColumns: "240px 1fr", gap: T.s4, alignItems: "start" }}>
-      {/* Item picker */}
-      <div style={{
-        background: T.bgCard, border: `1px solid ${T.border}`,
-        borderRadius: T.r_md, maxHeight: "70vh", overflowY: "auto",
-      }}>
-        {items.map(it => (
-          <button
-            key={it.id}
-            onClick={() => setSelected(it.id)}
-            style={{
-              display: "block", width: "100%", textAlign: "left",
-              padding: `${T.s2}px ${T.s3}px`,
-              background: selected === it.id ? T.bgHover : "transparent",
-              border: "none", borderLeft: selected === it.id ? `2px solid ${T.accent}` : "2px solid transparent",
-              color: selected === it.id ? T.text : T.textSec,
-              fontFamily: T.fontSans, fontSize: 13,
-              cursor: "pointer",
-              borderBottom: `1px solid ${T.border}`,
-            }}
-          >
-            {it.label}
-            {!it.hasOwnEntry && (
-              <span style={{ float: "right", color: T.warning, fontSize: 10, fontFamily: T.fontMono }}>missing</span>
-            )}
-          </button>
-        ))}
+  // Shared picker markup — used as 240px column on desktop and as
+  // fullscreen list on mobile.
+  const pickerMarkup = (
+    <div style={{
+      background: T.bgCard, border: `1px solid ${T.border}`,
+      borderRadius: T.r_md,
+      maxHeight: isMobile ? "none" : "70vh",
+      overflowY: isMobile ? "visible" : "auto",
+    }}>
+      {items.map(it => (
+        <button
+          key={it.id}
+          onClick={() => {
+            setSelected(it.id);
+            if (isMobile) setShowPicker(false);
+          }}
+          style={{
+            display: "block", width: "100%", textAlign: "left",
+            padding: `${T.s3}px ${T.s3}px`,
+            background: selected === it.id ? T.bgHover : "transparent",
+            border: "none",
+            borderLeft: selected === it.id ? `2px solid ${T.accent}` : "2px solid transparent",
+            color: selected === it.id ? T.text : T.textSec,
+            fontFamily: T.fontSans, fontSize: 13,
+            cursor: "pointer",
+            borderBottom: `1px solid ${T.border}`,
+            minHeight: 44,
+          }}
+        >
+          {it.label}
+          {!it.hasOwnEntry && (
+            <span style={{ float: "right", color: T.warning, fontSize: 10, fontFamily: T.fontMono }}>missing</span>
+          )}
+        </button>
+      ))}
+    </div>
+  );
+
+  const detailMarkup = (
+    !entry ? (
+      <div style={{ color: T.warning, fontSize: 13, fontFamily: T.fontSans, padding: T.s4,
+        background: T.bgCard, border: `1px solid ${T.border}`, borderRadius: T.r_md }}>
+        <strong>{selected}</strong> has no entry in <code style={{ color: T.info, fontFamily: T.fontMono }}>{category.complementTable}</code>.
+        <div style={{ marginTop: T.s2, color: T.textMuted, fontSize: 12 }}>
+          When a user picks this value, the suggestion system falls back to
+          reverse-scanning SUGGESTION_MAP. The system still works but
+          pairings will be less curated.
+        </div>
       </div>
-
-      {/* Family detail panel */}
+    ) : (
       <div>
-        {!entry ? (
-          <div style={{ color: T.warning, fontSize: 13, fontFamily: T.fontSans, padding: T.s4,
-            background: T.bgCard, border: `1px solid ${T.border}`, borderRadius: T.r_md }}>
-            <strong>{selected}</strong> has no entry in <code style={{ color: T.info, fontFamily: T.fontMono }}>{category.complementTable}</code>.
-            <div style={{ marginTop: T.s2, color: T.textMuted, fontSize: 12 }}>
-              When a user picks this value, the suggestion system falls back to
-              reverse-scanning SUGGESTION_MAP. The system still works but
-              pairings will be less curated.
+        <div style={{
+          fontFamily: T.fontSans, fontSize: 16, fontWeight: 600, color: T.text,
+          marginBottom: T.s4,
+        }}>Pairings for <span style={{ color: T.accent }}>{selected}</span></div>
+        {Object.entries(entry).map(([field, values]) => (
+          <div key={field} style={{ marginBottom: T.s4 }}>
+            <div style={{
+              fontFamily: T.fontMono, fontSize: 10,
+              color: T.textMuted, letterSpacing: "0.2em",
+              textTransform: "uppercase", marginBottom: T.s2,
+            }}>{field}</div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+              {(Array.isArray(values) ? values : [values]).map((v, i) => (
+                <span key={`${v}-${i}`} style={{
+                  padding: `5px 10px`,
+                  background: T.bgSurface,
+                  border: `1px solid ${T.borderHi}`,
+                  borderRadius: T.r_sm,
+                  color: T.text, fontSize: 12, fontFamily: T.fontMono, lineHeight: 1.3,
+                }}>{v}</span>
+              ))}
             </div>
           </div>
-        ) : (
-          <div>
-            <div style={{
-              fontFamily: T.fontSans, fontSize: 16, fontWeight: 600, color: T.text,
-              marginBottom: T.s4,
-            }}>Pairings for <span style={{ color: T.accent }}>{selected}</span></div>
-            {Object.entries(entry).map(([field, values]) => (
-              <div key={field} style={{ marginBottom: T.s4 }}>
-                <div style={{
-                  fontFamily: T.fontMono, fontSize: 10,
-                  color: T.textMuted, letterSpacing: "0.2em",
-                  textTransform: "uppercase", marginBottom: T.s2,
-                }}>{field}</div>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: T.s2 }}>
-                  {(Array.isArray(values) ? values : [values]).map((v, i) => (
-                    <span key={`${v}-${i}`} style={{
-                      padding: `${T.s1}px ${T.s2}px`,
-                      background: T.bgCard,
-                      border: `1px solid ${T.borderHi}`,
-                      borderRadius: T.r_sm,
-                      color: T.textSec, fontSize: 12, fontFamily: T.fontSans,
-                    }}>{v}</span>
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
+        ))}
       </div>
+    )
+  );
+
+  // ─── MOBILE: list-detail pattern ───
+  if (isMobile) {
+    if (showPicker) {
+      return (
+        <div>
+          <button
+            type="button"
+            onClick={() => setShowPicker(false)}
+            style={{
+              display: "inline-flex", alignItems: "center", gap: 6,
+              marginBottom: T.s3,
+              background: "transparent", border: "none", padding: `${T.s2}px 0`,
+              color: T.textSec, fontFamily: T.fontSans, fontSize: 13,
+              cursor: "pointer", minHeight: 44,
+            }}>
+            <span style={{ fontSize: 16 }}>←</span> Back to detail
+          </button>
+          <div style={{
+            fontFamily: T.fontMono, fontSize: 10, color: T.textMuted,
+            letterSpacing: "0.2em", textTransform: "uppercase", marginBottom: T.s2,
+          }}>Select {category.label.toLowerCase()}</div>
+          {pickerMarkup}
+        </div>
+      );
+    }
+    return (
+      <div>
+        <button
+          type="button"
+          onClick={() => setShowPicker(true)}
+          style={{
+            display: "inline-flex", alignItems: "center", gap: 8,
+            marginBottom: T.s4,
+            padding: `${T.s2}px ${T.s3}px`,
+            background: T.bgCard, border: `1px solid ${T.border}`,
+            borderRadius: T.r_sm,
+            color: T.text, fontFamily: T.fontSans, fontSize: 13,
+            cursor: "pointer", minHeight: 44,
+          }}>
+          <span style={{ color: T.textMuted, fontFamily: T.fontMono, fontSize: 10, letterSpacing: "0.15em", textTransform: "uppercase" }}>
+            Viewing
+          </span>
+          <span style={{ fontWeight: 600 }}>{selected}</span>
+          <span style={{ color: T.textMuted, marginLeft: 4 }}>▾</span>
+        </button>
+        {detailMarkup}
+      </div>
+    );
+  }
+
+  // ─── DESKTOP: split view ───
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "240px 1fr", gap: T.s4, alignItems: "start" }}>
+      {pickerMarkup}
+      <div>{detailMarkup}</div>
     </div>
   );
 }
@@ -125,14 +194,17 @@ function TreeFamily({ category, raw }) {
   const [expandedMain, setExpandedMain] = useState({});
   const [expandedSub, setExpandedSub] = useState({});
   const [selected, setSelected] = useState(null); // { level, main, sub?, leaf? }
+  const isMobile = useIsMobile();
 
-  // Auto-select the first main on mount so the right panel isn't empty
+  // Auto-select the first main on DESKTOP mount so the right panel isn't
+  // empty. On mobile we prefer to start on the tree itself so the user
+  // sees the hierarchy first and picks something deliberately.
   useEffect(() => {
-    if (!selected) {
+    if (!selected && !isMobile) {
       const firstMain = Object.keys(data)[0];
       if (firstMain) setSelected({ level: "main", main: firstMain });
     }
-  }, []);
+  }, [isMobile]);
 
   const toggleMain = (key, e) => {
     e.stopPropagation();
@@ -143,112 +215,158 @@ function TreeFamily({ category, raw }) {
     setExpandedSub(s => ({ ...s, [key]: !s[key] }));
   };
 
+  const pickItem = (item) => setSelected(item);
+  const backToTree = () => setSelected(null);
+
+  const treeMarkup = (
+    <div style={{
+      background: T.bgCard, border: `1px solid ${T.border}`,
+      borderRadius: T.r_md,
+      maxHeight: isMobile ? "none" : "75vh",
+      overflowY: isMobile ? "visible" : "auto",
+      padding: T.s1,
+    }}>
+      {Object.entries(data).map(([main, subs]) => {
+        const mainExpanded = !!expandedMain[main];
+        const subKeys = Object.keys(subs || {});
+        const isMainSelected = selected?.level === "main" && selected.main === main;
+        return (
+          <div key={main} style={{ marginBottom: 2 }}>
+            <div
+              onClick={() => pickItem({ level: "main", main })}
+              style={{
+                display: "flex", alignItems: "center", gap: T.s2,
+                padding: `${isMobile ? T.s3 : T.s1}px ${T.s2}px`,
+                background: isMainSelected ? T.bgHover : "transparent",
+                borderLeft: isMainSelected ? `2px solid ${T.accent}` : "2px solid transparent",
+                borderRadius: T.r_sm,
+                color: isMainSelected ? T.text : T.textSec,
+                cursor: "pointer",
+                fontFamily: T.fontSans, fontSize: isMobile ? 14 : 13, fontWeight: 600,
+                minHeight: isMobile ? 44 : "auto",
+              }}>
+              <span
+                onClick={(e) => toggleMain(main, e)}
+                style={{
+                  color: T.textMuted, fontFamily: T.fontMono,
+                  fontSize: isMobile ? 12 : 10,
+                  width: isMobile ? 20 : 12, textAlign: "center", cursor: "pointer",
+                  padding: isMobile ? "6px 4px" : "2px",
+                  flexShrink: 0,
+                }}>
+                {mainExpanded ? "▾" : "▸"}
+              </span>
+              <span style={{ flex: 1 }}>{main}</span>
+              <span style={{ color: T.textMuted, fontFamily: T.fontMono, fontSize: 10 }}>
+                {subKeys.length}
+              </span>
+            </div>
+            {mainExpanded && subKeys.map(subKey => {
+              const leaves = Array.isArray(subs[subKey]) ? subs[subKey] : [];
+              const subId = `${main}:${subKey}`;
+              const subExpanded = !!expandedSub[subId];
+              const isSubSelected = selected?.level === "sub" && selected.main === main && selected.sub === subKey;
+              return (
+                <div key={subKey}>
+                  <div
+                    onClick={() => pickItem({ level: "sub", main, sub: subKey })}
+                    style={{
+                      display: "flex", alignItems: "center", gap: T.s2,
+                      marginLeft: isMobile ? T.s5 : T.s4,
+                      padding: `${isMobile ? "10px" : "2px"} ${T.s2}px`,
+                      background: isSubSelected ? T.bgHover : "transparent",
+                      borderLeft: isSubSelected ? `2px solid ${T.accent}` : "2px solid transparent",
+                      borderRadius: T.r_sm,
+                      color: isSubSelected ? T.text : T.textSec,
+                      cursor: "pointer",
+                      fontFamily: T.fontSans, fontSize: isMobile ? 13 : 12,
+                      minHeight: isMobile ? 40 : "auto",
+                    }}>
+                    <span
+                      onClick={(e) => toggleSub(subId, e)}
+                      style={{
+                        color: T.textMuted, fontFamily: T.fontMono,
+                        fontSize: isMobile ? 11 : 9,
+                        width: isMobile ? 20 : 12, textAlign: "center", cursor: "pointer",
+                        padding: isMobile ? "6px 4px" : "2px",
+                        flexShrink: 0,
+                      }}>
+                      {subExpanded ? "▾" : "▸"}
+                    </span>
+                    <span style={{ flex: 1 }}>{subKey}</span>
+                    <span style={{ color: T.textMuted, fontFamily: T.fontMono, fontSize: 10 }}>
+                      {leaves.length}
+                    </span>
+                  </div>
+                  {subExpanded && leaves.map(leaf => {
+                    const isLeafSelected = selected?.level === "leaf"
+                      && selected.main === main
+                      && selected.sub === subKey
+                      && selected.leaf === leaf;
+                    return (
+                      <div
+                        key={leaf}
+                        onClick={() => pickItem({ level: "leaf", main, sub: subKey, leaf })}
+                        style={{
+                          marginLeft: isMobile ? T.s7 : T.s6,
+                          padding: `${isMobile ? "10px" : "2px"} ${T.s2}px`,
+                          background: isLeafSelected ? T.bgHover : "transparent",
+                          borderLeft: isLeafSelected ? `2px solid ${T.accent}` : "2px solid transparent",
+                          borderRadius: T.r_sm,
+                          color: isLeafSelected ? T.text : T.textMuted,
+                          cursor: "pointer",
+                          fontFamily: T.fontMono, fontSize: isMobile ? 12 : 11,
+                          minHeight: isMobile ? 36 : "auto",
+                        }}>
+                        {leaf}
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })}
+          </div>
+        );
+      })}
+    </div>
+  );
+
+  // ─── MOBILE: list-detail pattern ───
+  if (isMobile) {
+    if (!selected) {
+      return (
+        <div>
+          <div style={{
+            fontFamily: T.fontMono, fontSize: 10, color: T.textMuted,
+            letterSpacing: "0.2em", textTransform: "uppercase", marginBottom: T.s3,
+          }}>Pick an item to inspect</div>
+          {treeMarkup}
+        </div>
+      );
+    }
+    return (
+      <div>
+        <button
+          type="button"
+          onClick={backToTree}
+          style={{
+            display: "inline-flex", alignItems: "center", gap: 6,
+            marginBottom: T.s3,
+            background: "transparent", border: "none", padding: `${T.s2}px 0`,
+            color: T.textSec, fontFamily: T.fontSans, fontSize: 13,
+            cursor: "pointer", minHeight: 44,
+          }}>
+          <span style={{ fontSize: 16 }}>←</span> Back to tree
+        </button>
+        <TreeDetail category={category} data={data} selected={selected} raw={raw} />
+      </div>
+    );
+  }
+
+  // ─── DESKTOP: split view ───
   return (
     <div style={{ display: "grid", gridTemplateColumns: "320px 1fr", gap: T.s4, alignItems: "start" }}>
-      {/* ── LEFT: tree picker ── */}
-      <div style={{
-        background: T.bgCard, border: `1px solid ${T.border}`,
-        borderRadius: T.r_md, maxHeight: "75vh", overflowY: "auto",
-        padding: T.s1,
-      }}>
-        {Object.entries(data).map(([main, subs]) => {
-          const mainExpanded = !!expandedMain[main];
-          const subKeys = Object.keys(subs || {});
-          const isMainSelected = selected?.level === "main" && selected.main === main;
-          return (
-            <div key={main} style={{ marginBottom: 2 }}>
-              <div
-                onClick={() => setSelected({ level: "main", main })}
-                style={{
-                  display: "flex", alignItems: "center", gap: T.s2,
-                  padding: `${T.s1}px ${T.s2}px`,
-                  background: isMainSelected ? T.bgHover : "transparent",
-                  borderLeft: isMainSelected ? `2px solid ${T.accent}` : "2px solid transparent",
-                  borderRadius: T.r_sm,
-                  color: isMainSelected ? T.text : T.textSec,
-                  cursor: "pointer",
-                  fontFamily: T.fontSans, fontSize: 13, fontWeight: 600,
-                }}>
-                <span
-                  onClick={(e) => toggleMain(main, e)}
-                  style={{
-                    color: T.textMuted, fontFamily: T.fontMono, fontSize: 10,
-                    width: 12, textAlign: "center", cursor: "pointer",
-                    padding: "2px",
-                  }}>
-                  {mainExpanded ? "▾" : "▸"}
-                </span>
-                <span style={{ flex: 1 }}>{main}</span>
-                <span style={{ color: T.textMuted, fontFamily: T.fontMono, fontSize: 10 }}>
-                  {subKeys.length}
-                </span>
-              </div>
-              {mainExpanded && subKeys.map(subKey => {
-                const leaves = Array.isArray(subs[subKey]) ? subs[subKey] : [];
-                const subId = `${main}:${subKey}`;
-                const subExpanded = !!expandedSub[subId];
-                const isSubSelected = selected?.level === "sub" && selected.main === main && selected.sub === subKey;
-                return (
-                  <div key={subKey}>
-                    <div
-                      onClick={() => setSelected({ level: "sub", main, sub: subKey })}
-                      style={{
-                        display: "flex", alignItems: "center", gap: T.s2,
-                        marginLeft: T.s4,
-                        padding: `2px ${T.s2}px`,
-                        background: isSubSelected ? T.bgHover : "transparent",
-                        borderLeft: isSubSelected ? `2px solid ${T.accent}` : "2px solid transparent",
-                        borderRadius: T.r_sm,
-                        color: isSubSelected ? T.text : T.textSec,
-                        cursor: "pointer",
-                        fontFamily: T.fontSans, fontSize: 12,
-                      }}>
-                      <span
-                        onClick={(e) => toggleSub(subId, e)}
-                        style={{
-                          color: T.textMuted, fontFamily: T.fontMono, fontSize: 9,
-                          width: 12, textAlign: "center", cursor: "pointer",
-                          padding: "2px",
-                        }}>
-                        {subExpanded ? "▾" : "▸"}
-                      </span>
-                      <span style={{ flex: 1 }}>{subKey}</span>
-                      <span style={{ color: T.textMuted, fontFamily: T.fontMono, fontSize: 10 }}>
-                        {leaves.length}
-                      </span>
-                    </div>
-                    {subExpanded && leaves.map(leaf => {
-                      const isLeafSelected = selected?.level === "leaf"
-                        && selected.main === main
-                        && selected.sub === subKey
-                        && selected.leaf === leaf;
-                      return (
-                        <div
-                          key={leaf}
-                          onClick={() => setSelected({ level: "leaf", main, sub: subKey, leaf })}
-                          style={{
-                            marginLeft: T.s6,
-                            padding: `2px ${T.s2}px`,
-                            background: isLeafSelected ? T.bgHover : "transparent",
-                            borderLeft: isLeafSelected ? `2px solid ${T.accent}` : "2px solid transparent",
-                            borderRadius: T.r_sm,
-                            color: isLeafSelected ? T.text : T.textMuted,
-                            cursor: "pointer",
-                            fontFamily: T.fontMono, fontSize: 11,
-                          }}>
-                          {leaf}
-                        </div>
-                      );
-                    })}
-                  </div>
-                );
-              })}
-            </div>
-          );
-        })}
-      </div>
-
-      {/* ── RIGHT: detail pane ── */}
+      {treeMarkup}
       <div>
         <TreeDetail category={category} data={data} selected={selected} raw={raw} />
       </div>
@@ -257,6 +375,7 @@ function TreeFamily({ category, raw }) {
 }
 
 function TreeDetail({ category, data, selected, raw }) {
+  const isMobile = useIsMobile();
   if (!selected) {
     return (
       <div style={{ color: T.textMuted, fontSize: 13, fontFamily: T.fontSans, padding: T.s4 }}>
@@ -701,7 +820,7 @@ function TreeDetail({ category, data, selected, raw }) {
           <h1 style={{
             margin: 0,
             fontFamily: T.fontSans,
-            fontSize: 40,
+            fontSize: isMobile ? 28 : 40,
             fontWeight: 700,
             letterSpacing: "-0.025em",
             lineHeight: 1.08,
