@@ -1,5 +1,6 @@
-import React, { useState } from "react";
+import React, { useState, useEffect, Fragment } from "react";
 import { T } from "../theme.js";
+import { LINGUISTIC_FAMILIES, MUSIC_CONTEXT_CLUSTERS } from "../language-families.js";
 
 export default function FamilyView({ category, items, raw, derived }) {
   // Tree categories: render as expandable hierarchy
@@ -14,6 +15,12 @@ export default function FamilyView({ category, items, raw, derived }) {
         the full tree.
       </div>
     );
+  }
+
+  // Languages: special-case — no complement table, but we have a
+  // family tree based on linguistic ancestry + music-context clusters.
+  if (category.id === "languages") {
+    return <LanguagesFamily items={items} />;
   }
 
   // Flat categories without complement table: no family info
@@ -105,82 +112,598 @@ export default function FamilyView({ category, items, raw, derived }) {
   );
 }
 
-// ── Tree view for Genres / Instruments — collapsible 3-level hierarchy
+// ── Tree picker+detail for Genres / Instruments ────────────────────
+// Matches the Moods Family pattern: left = item picker, right = detail.
+// Adapted for 3-level hierarchy (main → sub → leaf). Selection tracks
+// which level was clicked so the detail pane can show the right info:
+//   · main selected → summary of sub-categories with their counts
+//   · sub selected → list of all leaves under this sub + parent crumb
+//   · leaf selected → breadcrumb + cross-references in other catalogs
+//                     (for Instruments: also SUGGESTION_MAP pairings)
 function TreeFamily({ category, raw }) {
   const data = category.fetcher(raw);
   const [expandedMain, setExpandedMain] = useState({});
   const [expandedSub, setExpandedSub] = useState({});
+  const [selected, setSelected] = useState(null); // { level, main, sub?, leaf? }
+
+  // Auto-select the first main on mount so the right panel isn't empty
+  useEffect(() => {
+    if (!selected) {
+      const firstMain = Object.keys(data)[0];
+      if (firstMain) setSelected({ level: "main", main: firstMain });
+    }
+  }, []);
+
+  const toggleMain = (key, e) => {
+    e.stopPropagation();
+    setExpandedMain(s => ({ ...s, [key]: !s[key] }));
+  };
+  const toggleSub = (key, e) => {
+    e.stopPropagation();
+    setExpandedSub(s => ({ ...s, [key]: !s[key] }));
+  };
 
   return (
-    <div style={{ fontFamily: T.fontSans, fontSize: 13 }}>
-      {Object.entries(data).map(([main, subs]) => {
-        const isExpanded = !!expandedMain[main];
-        const subKeys = Object.keys(subs || {});
+    <div style={{ display: "grid", gridTemplateColumns: "320px 1fr", gap: T.s4, alignItems: "start" }}>
+      {/* ── LEFT: tree picker ── */}
+      <div style={{
+        background: T.bgCard, border: `1px solid ${T.border}`,
+        borderRadius: T.r_md, maxHeight: "75vh", overflowY: "auto",
+        padding: T.s1,
+      }}>
+        {Object.entries(data).map(([main, subs]) => {
+          const mainExpanded = !!expandedMain[main];
+          const subKeys = Object.keys(subs || {});
+          const isMainSelected = selected?.level === "main" && selected.main === main;
+          return (
+            <div key={main} style={{ marginBottom: 2 }}>
+              <div
+                onClick={() => setSelected({ level: "main", main })}
+                style={{
+                  display: "flex", alignItems: "center", gap: T.s2,
+                  padding: `${T.s1}px ${T.s2}px`,
+                  background: isMainSelected ? T.bgHover : "transparent",
+                  borderLeft: isMainSelected ? `2px solid ${T.accent}` : "2px solid transparent",
+                  borderRadius: T.r_sm,
+                  color: isMainSelected ? T.text : T.textSec,
+                  cursor: "pointer",
+                  fontFamily: T.fontSans, fontSize: 13, fontWeight: 600,
+                }}>
+                <span
+                  onClick={(e) => toggleMain(main, e)}
+                  style={{
+                    color: T.textMuted, fontFamily: T.fontMono, fontSize: 10,
+                    width: 12, textAlign: "center", cursor: "pointer",
+                    padding: "2px",
+                  }}>
+                  {mainExpanded ? "▾" : "▸"}
+                </span>
+                <span style={{ flex: 1 }}>{main}</span>
+                <span style={{ color: T.textMuted, fontFamily: T.fontMono, fontSize: 10 }}>
+                  {subKeys.length}
+                </span>
+              </div>
+              {mainExpanded && subKeys.map(subKey => {
+                const leaves = Array.isArray(subs[subKey]) ? subs[subKey] : [];
+                const subId = `${main}:${subKey}`;
+                const subExpanded = !!expandedSub[subId];
+                const isSubSelected = selected?.level === "sub" && selected.main === main && selected.sub === subKey;
+                return (
+                  <div key={subKey}>
+                    <div
+                      onClick={() => setSelected({ level: "sub", main, sub: subKey })}
+                      style={{
+                        display: "flex", alignItems: "center", gap: T.s2,
+                        marginLeft: T.s4,
+                        padding: `2px ${T.s2}px`,
+                        background: isSubSelected ? T.bgHover : "transparent",
+                        borderLeft: isSubSelected ? `2px solid ${T.accent}` : "2px solid transparent",
+                        borderRadius: T.r_sm,
+                        color: isSubSelected ? T.text : T.textSec,
+                        cursor: "pointer",
+                        fontFamily: T.fontSans, fontSize: 12,
+                      }}>
+                      <span
+                        onClick={(e) => toggleSub(subId, e)}
+                        style={{
+                          color: T.textMuted, fontFamily: T.fontMono, fontSize: 9,
+                          width: 12, textAlign: "center", cursor: "pointer",
+                          padding: "2px",
+                        }}>
+                        {subExpanded ? "▾" : "▸"}
+                      </span>
+                      <span style={{ flex: 1 }}>{subKey}</span>
+                      <span style={{ color: T.textMuted, fontFamily: T.fontMono, fontSize: 10 }}>
+                        {leaves.length}
+                      </span>
+                    </div>
+                    {subExpanded && leaves.map(leaf => {
+                      const isLeafSelected = selected?.level === "leaf"
+                        && selected.main === main
+                        && selected.sub === subKey
+                        && selected.leaf === leaf;
+                      return (
+                        <div
+                          key={leaf}
+                          onClick={() => setSelected({ level: "leaf", main, sub: subKey, leaf })}
+                          style={{
+                            marginLeft: T.s6,
+                            padding: `2px ${T.s2}px`,
+                            background: isLeafSelected ? T.bgHover : "transparent",
+                            borderLeft: isLeafSelected ? `2px solid ${T.accent}` : "2px solid transparent",
+                            borderRadius: T.r_sm,
+                            color: isLeafSelected ? T.text : T.textMuted,
+                            cursor: "pointer",
+                            fontFamily: T.fontMono, fontSize: 11,
+                          }}>
+                          {leaf}
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* ── RIGHT: detail pane ── */}
+      <div>
+        <TreeDetail category={category} data={data} selected={selected} raw={raw} />
+      </div>
+    </div>
+  );
+}
+
+function TreeDetail({ category, data, selected, raw }) {
+  if (!selected) {
+    return (
+      <div style={{ color: T.textMuted, fontSize: 13, fontFamily: T.fontSans, padding: T.s4 }}>
+        Pick an item from the tree on the left.
+      </div>
+    );
+  }
+
+  // Breadcrumb helper
+  const Breadcrumb = ({ parts }) => (
+    <div style={{
+      fontFamily: T.fontMono, fontSize: 11,
+      color: T.textMuted, letterSpacing: "0.05em",
+      marginBottom: T.s3,
+    }}>
+      {parts.map((p, i) => (
+        <span key={i}>
+          {i > 0 && <span style={{ margin: "0 6px", color: T.textDim }}>→</span>}
+          <span style={{ color: i === parts.length - 1 ? T.text : T.textSec }}>{p}</span>
+        </span>
+      ))}
+    </div>
+  );
+
+  const PairingPills = ({ values }) => (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: T.s1 }}>
+      {values.map((v, i) => (
+        <span key={`${v}-${i}`} style={{
+          padding: `${T.s1}px ${T.s2}px`,
+          background: T.bgCard, border: `1px solid ${T.borderHi}`,
+          borderRadius: T.r_sm,
+          color: T.textSec, fontSize: 11, fontFamily: T.fontMono,
+        }}>{v}</span>
+      ))}
+    </div>
+  );
+
+  // ── MAIN selected: show summary + list of sub-categories ──
+  if (selected.level === "main") {
+    const subs = data[selected.main] || {};
+    const subEntries = Object.entries(subs);
+    const totalLeaves = subEntries.reduce((a, [, v]) => a + (Array.isArray(v) ? v.length : 0), 0);
+    return (
+      <div>
+        <Breadcrumb parts={[selected.main]} />
+        <div style={{
+          fontFamily: T.fontSans, fontSize: 20, fontWeight: 600, color: T.text,
+          marginBottom: T.s3,
+        }}>{selected.main}</div>
+        <div style={{ display: "flex", gap: T.s4, marginBottom: T.s4 }}>
+          <StatPill label={subLabel(category)} value={subEntries.length} />
+          <StatPill label={leafLabel(category)} value={totalLeaves} />
+        </div>
+        <div style={{
+          fontFamily: T.fontMono, fontSize: 10, color: T.textMuted,
+          letterSpacing: "0.2em", textTransform: "uppercase", marginBottom: T.s2,
+        }}>{subLabel(category)}</div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 80px", gap: T.s1 }}>
+          {subEntries.map(([subKey, leaves]) => (
+            <Fragment key={subKey}>
+              <div style={{
+                padding: `${T.s1}px ${T.s2}px`,
+                color: T.text, fontFamily: T.fontSans, fontSize: 13,
+                borderBottom: `1px solid ${T.border}`,
+              }}>{subKey}</div>
+              <div style={{
+                padding: `${T.s1}px ${T.s2}px`,
+                color: T.textMuted, fontFamily: T.fontMono, fontSize: 11,
+                textAlign: "right",
+                borderBottom: `1px solid ${T.border}`,
+              }}>{Array.isArray(leaves) ? leaves.length : 0}</div>
+            </Fragment>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  // ── SUB selected: show all leaves under this sub ──
+  if (selected.level === "sub") {
+    const leaves = data[selected.main]?.[selected.sub] || [];
+    // Instruments: the "sub" IS the instrument. Show its SUGGESTION_MAP
+    // pairings same way Mood Family shows complements.
+    const suggestionEntry = category.id === "instruments"
+      ? raw.SUGGESTION_MAP?.[selected.sub]
+      : null;
+    return (
+      <div>
+        <Breadcrumb parts={[selected.main, selected.sub]} />
+        <div style={{
+          fontFamily: T.fontSans, fontSize: 20, fontWeight: 600, color: T.text,
+          marginBottom: T.s3,
+        }}>{selected.sub}</div>
+        <div style={{ display: "flex", gap: T.s4, marginBottom: T.s4 }}>
+          <StatPill label={leafLabel(category)} value={leaves.length} />
+          {suggestionEntry && (
+            <StatPill
+              label="Pairing fields"
+              value={Object.keys(suggestionEntry).filter(k => Array.isArray(suggestionEntry[k])).length}
+            />
+          )}
+        </div>
+
+        {/* Instruments show pairings FIRST (primary info), articulations
+            second. Genres / other trees skip the pairings section. */}
+        {suggestionEntry && (
+          <div style={{ marginBottom: T.s5 }}>
+            <div style={{
+              fontFamily: T.fontMono, fontSize: 10, color: T.textMuted,
+              letterSpacing: "0.2em", textTransform: "uppercase", marginBottom: T.s2,
+            }}>Pairings (SUGGESTION_MAP)</div>
+            {Object.entries(suggestionEntry).map(([field, values]) => (
+              <div key={field} style={{ marginBottom: T.s3 }}>
+                <div style={{
+                  fontFamily: T.fontMono, fontSize: 10, color: T.textMuted,
+                  letterSpacing: "0.15em", textTransform: "uppercase", marginBottom: T.s1,
+                  opacity: 0.8,
+                }}>{field}</div>
+                <PairingPills values={Array.isArray(values) ? values : [values]} />
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Instruments without a SUGGESTION_MAP entry — warning */}
+        {category.id === "instruments" && !suggestionEntry && (
+          <div style={{
+            padding: T.s3, marginBottom: T.s4,
+            background: T.bgCard, border: `1px solid ${T.warning}`, borderRadius: T.r_md,
+            color: T.warning, fontSize: 12, fontFamily: T.fontSans,
+          }}>
+            No SUGGESTION_MAP entry for <span style={{ fontFamily: T.fontMono }}>"{selected.sub}"</span>.
+            When users pick this instrument, suggestions fall back to reverse-scan.
+          </div>
+        )}
+
+        <div style={{
+          fontFamily: T.fontMono, fontSize: 10, color: T.textMuted,
+          letterSpacing: "0.2em", textTransform: "uppercase", marginBottom: T.s2,
+        }}>{leafLabel(category)}</div>
+        <PairingPills values={Array.isArray(leaves) ? leaves : []} />
+      </div>
+    );
+  }
+
+  // ── LEAF selected: show breadcrumb + cross-references ──
+  // For Instruments: if the LEAF is what gets picked as an "instrument"
+  // in the Engine (SPECIFIC_INSTRUMENTS[family][instrument] = articulations
+  // so instrument is actually the SUB level, not the leaf), and the leaves
+  // are articulations. For Genres: leaf is a micro-style. Cross-references
+  // look for the string in SUGGESTION_MAP, GENRE_INTUITION, etc.
+  if (selected.level === "leaf") {
+    const isInstruments = category.id === "instruments";
+    const leaf = selected.leaf;
+    return (
+      <div>
+        <Breadcrumb parts={[selected.main, selected.sub, leaf]} />
+        <div style={{
+          fontFamily: T.fontSans, fontSize: 20, fontWeight: 600, color: T.text,
+          marginBottom: T.s3,
+        }}>{leaf}</div>
+        <div style={{
+          fontFamily: T.fontMono, fontSize: 11, color: T.textSec,
+          marginBottom: T.s4,
+        }}>
+          {isInstruments ? "Articulation variant" : "Micro-style"}
+          {" · "}
+          <span style={{ color: T.textMuted }}>{selected.main} → {selected.sub}</span>
+        </div>
+        <CrossRefs value={leaf} raw={raw} isLeaf />
+      </div>
+    );
+  }
+
+  return null;
+}
+
+// ── Cross-reference finder — scans SUGGESTION_MAP + GENRE_INTUITION +
+// all complement tables for mentions of a value, grouped by where found.
+function CrossRefs({ value, raw, isLeaf }) {
+  const hits = [];
+  const valueLower = String(value).toLowerCase();
+
+  // SUGGESTION_MAP: instrument → { mood: [...], groove: [...], ... }
+  // We want instruments whose ANY array contains our value.
+  if (raw.SUGGESTION_MAP) {
+    const sugHits = [];
+    for (const [inst, entry] of Object.entries(raw.SUGGESTION_MAP)) {
+      if (!entry || typeof entry !== "object") continue;
+      for (const arr of Object.values(entry)) {
+        if (Array.isArray(arr) && arr.includes(value)) {
+          sugHits.push(inst);
+          break;
+        }
+      }
+    }
+    if (sugHits.length > 0) hits.push({ source: "SUGGESTION_MAP", items: sugHits });
+  }
+
+  // GENRE_INTUITION: genre → { moods: [...], grooves: [...], ... }
+  if (raw.GENRE_INTUITION) {
+    const genreHits = [];
+    for (const [genre, entry] of Object.entries(raw.GENRE_INTUITION)) {
+      if (!entry || typeof entry !== "object") continue;
+      for (const arr of Object.values(entry)) {
+        if (Array.isArray(arr) && arr.includes(value)) {
+          genreHits.push(genre);
+          break;
+        }
+      }
+    }
+    if (genreHits.length > 0) hits.push({ source: "GENRE_INTUITION", items: genreHits });
+  }
+
+  // All complement tables
+  const complementTables = ["MOOD_COMPLEMENTS","GROOVE_COMPLEMENTS","LYRICAL_COMPLEMENTS","ENERGY_COMPLEMENTS","VOCALIST_COMPLEMENTS","HARMONIC_COMPLEMENTS","TEXTURE_COMPLEMENTS","MIX_COMPLEMENTS"];
+  for (const tableName of complementTables) {
+    const table = raw[tableName];
+    if (!table) continue;
+    const refs = [];
+    for (const [key, entry] of Object.entries(table)) {
+      if (!entry || typeof entry !== "object") continue;
+      for (const arr of Object.values(entry)) {
+        if (Array.isArray(arr) && arr.includes(value)) {
+          refs.push(key);
+          break;
+        }
+      }
+    }
+    if (refs.length > 0) hits.push({ source: tableName, items: refs });
+  }
+
+  if (hits.length === 0) {
+    return (
+      <div style={{
+        padding: T.s4,
+        background: T.bgCard, border: `1px solid ${T.border}`, borderRadius: T.r_md,
+        color: T.textMuted, fontSize: 12, fontFamily: T.fontSans,
+      }}>
+        No other catalogs reference <span style={{ color: T.textSec, fontFamily: T.fontMono }}>"{value}"</span>.
+        This is a leaf value only used in its parent tree.
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div style={{
+        fontFamily: T.fontMono, fontSize: 10, color: T.textMuted,
+        letterSpacing: "0.2em", textTransform: "uppercase", marginBottom: T.s2,
+      }}>Referenced in</div>
+      {hits.map(({ source, items }) => (
+        <div key={source} style={{ marginBottom: T.s3 }}>
+          <div style={{
+            fontFamily: T.fontMono, fontSize: 11, color: T.info,
+            marginBottom: T.s1,
+          }}>{source}</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: T.s1 }}>
+            {items.map(item => (
+              <span key={item} style={{
+                padding: `${T.s1}px ${T.s2}px`,
+                background: T.bgCard, border: `1px solid ${T.borderHi}`,
+                borderRadius: T.r_sm,
+                color: T.textSec, fontSize: 11, fontFamily: T.fontMono,
+              }}>{item}</span>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function StatPill({ label, value }) {
+  return (
+    <div style={{
+      padding: `${T.s2}px ${T.s3}px`,
+      background: T.bgCard, border: `1px solid ${T.border}`, borderRadius: T.r_md,
+    }}>
+      <div style={{
+        fontFamily: T.fontMono, fontSize: 9, color: T.textMuted,
+        letterSpacing: "0.2em", textTransform: "uppercase",
+      }}>{label}</div>
+      <div style={{
+        fontFamily: T.fontSans, fontSize: 20, fontWeight: 600, color: T.text,
+        marginTop: 2,
+      }}>{value}</div>
+    </div>
+  );
+}
+
+// Per-category labels so the UI says "Sub-genres" for genres vs
+// "Instruments" for instruments, etc.
+function subLabel(category) {
+  if (category.id === "genres") return "Sub-genres";
+  if (category.id === "instruments") return "Instruments";
+  return "Items";
+}
+function leafLabel(category) {
+  if (category.id === "genres") return "Micro-styles";
+  if (category.id === "instruments") return "Articulations";
+  return "Entries";
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// LANGUAGES family view — taxonomy toggle between linguistic family and
+// music-context cluster. Each group collapses/expands. Languages in the
+// catalog but NOT placed in the current taxonomy's grouping surface at
+// the bottom as "Uncategorized" so you can tell when something needs
+// to be added to the grouping config.
+// ═══════════════════════════════════════════════════════════════════════
+function LanguagesFamily({ items }) {
+  const [taxonomy, setTaxonomy] = useState("linguistic");
+  const [expanded, setExpanded] = useState({});
+  const toggle = k => setExpanded(s => ({ ...s, [k]: !s[k] }));
+
+  const groups = taxonomy === "linguistic"
+    ? LINGUISTIC_FAMILIES
+    : MUSIC_CONTEXT_CLUSTERS;
+
+  // Map code → item for fast lookup
+  const byCode = {};
+  for (const it of items) byCode[it.id] = it;
+
+  // Build the rendered group list. Track which codes were placed so we
+  // can show "Uncategorized" at the end for any leftovers.
+  const placed = new Set();
+  const renderGroups = [];
+  for (const [groupName, codes] of Object.entries(groups)) {
+    const groupItems = codes
+      .map(c => byCode[c])
+      .filter(Boolean);
+    if (groupItems.length === 0) continue;
+    for (const c of codes) placed.add(c);
+    renderGroups.push({ name: groupName, items: groupItems });
+  }
+  const uncategorized = items.filter(it => !placed.has(it.id));
+  if (uncategorized.length > 0) {
+    renderGroups.push({
+      name: "Uncategorized (not yet placed in this taxonomy)",
+      items: uncategorized,
+      isWarning: true,
+    });
+  }
+
+  return (
+    <div>
+      {/* Taxonomy toggle */}
+      <div style={{
+        display: "inline-flex", gap: 1,
+        background: T.bgCard, border: `1px solid ${T.border}`,
+        borderRadius: T.r_md, padding: 2,
+        marginBottom: T.s5,
+      }}>
+        {[
+          { id: "linguistic", label: "Linguistic family", hint: "By ancestry + grammar" },
+          { id: "music",      label: "Music context",     hint: "By pop/regional scene" },
+        ].map(t => (
+          <button
+            key={t.id}
+            onClick={() => setTaxonomy(t.id)}
+            title={t.hint}
+            style={{
+              padding: `${T.s2}px ${T.s4}px`,
+              background: taxonomy === t.id ? T.accent : "transparent",
+              border: "none", borderRadius: T.r_sm,
+              color: taxonomy === t.id ? "#fff" : T.textSec,
+              fontFamily: T.fontSans, fontSize: 12, fontWeight: 500,
+              cursor: "pointer",
+            }}
+          >{t.label}</button>
+        ))}
+      </div>
+
+      {/* Summary row */}
+      <div style={{
+        display: "flex", gap: T.s3, marginBottom: T.s4,
+        fontFamily: T.fontMono, fontSize: 11, color: T.textMuted,
+      }}>
+        <span>{renderGroups.filter(g => !g.isWarning).length} groups</span>
+        <span>·</span>
+        <span>{items.length} total languages</span>
+        {uncategorized.length > 0 && (
+          <>
+            <span>·</span>
+            <span style={{ color: T.warning }}>{uncategorized.length} uncategorized</span>
+          </>
+        )}
+      </div>
+
+      {/* Group accordion */}
+      {renderGroups.map(group => {
+        const isOpen = expanded[group.name] !== false; // default expanded
         return (
-          <div key={main} style={{ marginBottom: T.s2 }}>
+          <div key={group.name} style={{ marginBottom: T.s3 }}>
             <button
-              onClick={() => setExpandedMain(s => ({ ...s, [main]: !s[main] }))}
+              onClick={() => toggle(group.name)}
               style={{
                 display: "flex", alignItems: "center", gap: T.s2,
                 width: "100%", textAlign: "left",
                 padding: `${T.s2}px ${T.s3}px`,
                 background: T.bgCard,
-                border: `1px solid ${T.border}`,
+                border: `1px solid ${group.isWarning ? T.warning : T.border}`,
                 borderRadius: T.r_sm,
-                color: T.text, cursor: "pointer",
+                color: group.isWarning ? T.warning : T.text,
+                cursor: "pointer",
                 fontFamily: T.fontSans, fontSize: 13, fontWeight: 600,
               }}>
               <span style={{ color: T.textMuted, fontFamily: T.fontMono, fontSize: 11, width: 10 }}>
-                {isExpanded ? "▾" : "▸"}
+                {isOpen ? "▾" : "▸"}
               </span>
-              <span style={{ flex: 1 }}>{main}</span>
+              <span style={{ flex: 1 }}>{group.name}</span>
               <span style={{ color: T.textMuted, fontFamily: T.fontMono, fontSize: 11 }}>
-                {subKeys.length} sub
+                {group.items.length}
               </span>
             </button>
-            {isExpanded && subKeys.map(subKey => {
-              const micros = Array.isArray(subs[subKey]) ? subs[subKey] : [];
-              const subId = `${main}:${subKey}`;
-              const subExpanded = !!expandedSub[subId];
-              return (
-                <div key={subKey} style={{ marginLeft: T.s5, marginTop: T.s1 }}>
-                  <button
-                    onClick={() => setExpandedSub(s => ({ ...s, [subId]: !s[subId] }))}
-                    style={{
-                      display: "flex", alignItems: "center", gap: T.s2,
-                      width: "100%", textAlign: "left",
-                      padding: `${T.s1}px ${T.s3}px`,
-                      background: "transparent", border: "none",
-                      color: T.textSec, cursor: "pointer",
-                      fontFamily: T.fontSans, fontSize: 12,
-                    }}>
-                    <span style={{ color: T.textMuted, fontFamily: T.fontMono, fontSize: 10, width: 10 }}>
-                      {subExpanded ? "▾" : "▸"}
-                    </span>
-                    <span style={{ flex: 1 }}>{subKey}</span>
-                    <span style={{ color: T.textMuted, fontFamily: T.fontMono, fontSize: 10 }}>
-                      {micros.length}
-                    </span>
-                  </button>
-                  {subExpanded && (
-                    <div style={{
-                      marginLeft: T.s6, padding: `${T.s2}px 0`,
-                      display: "flex", flexWrap: "wrap", gap: T.s1,
-                    }}>
-                      {micros.map(m => (
-                        <span key={m} style={{
-                          padding: `${T.s1}px ${T.s2}px`,
-                          background: T.bgCard,
-                          border: `1px solid ${T.border}`,
-                          borderRadius: T.r_sm,
-                          color: T.textMuted, fontSize: 11, fontFamily: T.fontMono,
-                        }}>{m}</span>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
+            {isOpen && (
+              <div style={{
+                marginLeft: T.s5, marginTop: T.s2,
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))",
+                gap: T.s2,
+              }}>
+                {group.items.map(it => (
+                  <div key={it.id} style={{
+                    padding: `${T.s2}px ${T.s3}px`,
+                    background: T.bg,
+                    border: `1px solid ${T.border}`,
+                    borderRadius: T.r_sm,
+                    display: "flex", alignItems: "center", gap: T.s3,
+                  }}>
+                    <span style={{
+                      padding: `${T.s1}px ${T.s2}px`,
+                      background: T.bgCard,
+                      borderRadius: T.r_sm,
+                      color: T.textMuted,
+                      fontFamily: T.fontMono, fontSize: 10,
+                      textTransform: "uppercase", letterSpacing: "0.05em",
+                      flexShrink: 0,
+                    }}>{it.id}</span>
+                    <span style={{
+                      color: T.text, fontFamily: T.fontSans, fontSize: 13,
+                    }}>{it.label}</span>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         );
       })}
