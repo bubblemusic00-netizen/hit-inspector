@@ -2,6 +2,9 @@ import React, { useMemo, useState, useRef, useEffect, Suspense } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls, Html, Instances, Instance, Stars, Line, Segments, Segment } from "@react-three/drei";
 import * as THREE from "three";
+import { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
+import { LineSegmentsGeometry } from "three/examples/jsm/lines/LineSegmentsGeometry.js";
+import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
 import { T } from "../theme.js";
 import { CATEGORIES } from "../categories.js";
 
@@ -1722,65 +1725,158 @@ function AttributeNodes({ attributes, focused, layout, onSelect, onHover, sizeMu
   );
 }
 
-// Unified edges renderer — each edge is its own drei <Line> (MeshLine-backed)
-// so it gets proper thick width AND per-edge pointer events. Tooltips and
-// click-to-navigate live at the callsite; this component just renders.
-// For ~1500 edges (genre view ON mode) this is still <1 draw call/edge and
-// holds 60fps on any GPU made after 2015.
+// Batched edges renderer — all edges live in ONE LineSegments2 mesh, so
+// the GPU sees a single draw call no matter how many lines there are.
+// With individual drei <Line> components per edge, hub-focus with 40+
+// connections was costing 40+ draw calls and MeshLine shader invocations,
+// which is why focus dropped fps. Now it's effectively free.
+//
+// Hit detection: LineSegments2's raycast populates `faceIndex` on the
+// intersection — that's the segment index in the order we pushed positions.
+// We maintain a parallel `edgeLookup` so we can map faceIndex → edge data.
+//
+// Hover highlight: rather than rebuild the batched geometry on every
+// hover (expensive), we overlay a single drei <Line> on top of the
+// hovered segment — one extra draw call that only exists while hovered.
 function InteractiveEdges({
   edges, visible = true, opacity = 1,
   hoveredIndex = -1,
   onHoverEdge, onClickEdge,
-  widthBase = 2.4, widthHover = 4.5,
+  widthBase = 3.0, widthHover = 6.0,
 }) {
-  if (!visible || !edges.length) return null;
-  // Per-endpoint shortening based on node kind — stops the line geometry
-  // from reaching inside the body (so clicks on the body aren't eaten by
-  // the line's hit-test strip, and the line visually looks like it anchors
-  // on the body's surface, not its center).
-  const nodeMargin = (k) => {
-    switch (k) {
-      case "big":       return 1.5;   // ~BIG_R * BIG_MULT * 0.8
-      case "mid":       return 0.62;  // ~MID_R * MID_MULT * 0.9
-      case "small":     return 0.30;
-      case "attribute": return 0.45;
-      default:          return 0.45;
+  const { size } = useThree();
+  const clearTimerRef = useRef(null);
+
+  // Build the batched mesh + lookup from edges. Shortened at each endpoint
+  // by a kind-aware margin so lines don't overlap node bodies (fixes click
+  // stealing from small nodes).
+  const { mesh, edgeLookup } = useMemo(() => {
+    if (!visible || !edges.length) return { mesh: null, edgeLookup: [] };
+    const nodeMargin = (k) => {
+      switch (k) {
+        case "big":       return 1.5;
+        case "mid":       return 0.62;
+        case "small":     return 0.30;
+        case "attribute": return 0.45;
+        default:          return 0.45;
+      }
+    };
+    const positions = [];
+    const colorsArr = [];
+    const lookup = [];
+    const c = new THREE.Color();
+    for (let ei = 0; ei < edges.length; ei++) {
+      const e = edges[ei];
+      const dx = e.to[0] - e.from[0];
+      const dy = e.to[1] - e.from[1];
+      const dz = e.to[2] - e.from[2];
+      const len = Math.sqrt(dx*dx + dy*dy + dz*dz);
+      if (len < 0.001) continue;
+      const mFrom = Math.min(nodeMargin(e.fromNode?.kind), len * 0.35);
+      const mTo   = Math.min(nodeMargin(e.toNode?.kind),   len * 0.35);
+      const tFrom = mFrom / len;
+      const tTo   = mTo   / len;
+      positions.push(
+        e.from[0] + dx*tFrom, e.from[1] + dy*tFrom, e.from[2] + dz*tFrom,
+        e.to[0]   - dx*tTo,   e.to[1]   - dy*tTo,   e.to[2]   - dz*tTo
+      );
+      c.set(e.color || "#5E6AD2");
+      colorsArr.push(c.r, c.g, c.b, c.r, c.g, c.b);
+      lookup.push(e);
+    }
+    if (!lookup.length) return { mesh: null, edgeLookup: [] };
+
+    const geom = new LineSegmentsGeometry();
+    geom.setPositions(positions);
+    geom.setColors(colorsArr);
+
+    const mat = new LineMaterial({
+      vertexColors: true,
+      linewidth: widthBase,
+      transparent: true,
+      opacity: opacity,
+      depthTest: true,
+      depthWrite: false,
+      worldUnits: false,  // linewidth is in pixels, constant under zoom
+      toneMapped: false,
+    });
+    mat.resolution.set(size.width || window.innerWidth, size.height || window.innerHeight);
+
+    return { mesh: new LineSegments2(geom, mat), edgeLookup: lookup };
+  }, [edges, visible]); // rebuild only when edge set changes
+
+  // Keep resolution, linewidth, opacity in sync with props without
+  // tearing down the geometry.
+  useEffect(() => {
+    if (!mesh) return;
+    mesh.material.resolution.set(size.width || window.innerWidth, size.height || window.innerHeight);
+  }, [mesh, size.width, size.height]);
+
+  useEffect(() => {
+    if (!mesh) return;
+    mesh.material.linewidth = widthBase;
+    mesh.material.opacity = opacity;
+    mesh.material.needsUpdate = true;
+  }, [mesh, widthBase, opacity]);
+
+  // Dispose on unmount / rebuild
+  useEffect(() => () => {
+    if (mesh) {
+      mesh.geometry?.dispose?.();
+      mesh.material?.dispose?.();
+    }
+  }, [mesh]);
+
+  if (!mesh) return null;
+
+  const hoveredEdge = hoveredIndex >= 0 ? edgeLookup[hoveredIndex] : null;
+
+  // Hover exit grace — user complained that hover vanishes before they can
+  // move toward the click. 220ms delay gives them time to commit.
+  const scheduleClear = () => {
+    if (clearTimerRef.current) clearTimeout(clearTimerRef.current);
+    clearTimerRef.current = setTimeout(() => {
+      if (onHoverEdge) onHoverEdge(-1);
+    }, 220);
+  };
+  const cancelClear = () => {
+    if (clearTimerRef.current) {
+      clearTimeout(clearTimerRef.current);
+      clearTimerRef.current = null;
     }
   };
+
   return (
     <>
-      {edges.map((e, i) => {
-        const dx = e.to[0] - e.from[0];
-        const dy = e.to[1] - e.from[1];
-        const dz = e.to[2] - e.from[2];
-        const len = Math.sqrt(dx*dx + dy*dy + dz*dz);
-        if (len < 0.001) return null;
-        // Clamp so a short edge doesn't end up negative-length.
-        const mFrom = Math.min(nodeMargin(e.fromNode?.kind), len * 0.35);
-        const mTo   = Math.min(nodeMargin(e.toNode?.kind),   len * 0.35);
-        const tFrom = mFrom / len;
-        const tTo   = mTo   / len;
-        const from = [e.from[0] + dx*tFrom, e.from[1] + dy*tFrom, e.from[2] + dz*tFrom];
-        const to   = [e.to[0]   - dx*tTo,   e.to[1]   - dy*tTo,   e.to[2]   - dz*tTo];
-        const isHov = i === hoveredIndex;
-        const baseOp = e.kind === "tree" ? 0.85
-                     : e.kind === "attr" ? 0.62
-                     : e.kind === "compl" ? 0.55
-                     : 0.80;
-        return (
-          <Line
-            key={i}
-            points={[from, to]}
-            color={isHov ? "#ffffff" : (e.color || "#5E6AD2")}
-            lineWidth={isHov ? widthHover : widthBase}
-            transparent
-            opacity={Math.max(0.001, (isHov ? 1 : baseOp) * opacity)}
-            onPointerOver={(ev) => { ev.stopPropagation(); onHoverEdge && onHoverEdge(i); }}
-            onPointerOut={(ev) => { ev.stopPropagation(); onHoverEdge && onHoverEdge(-1); }}
-            onClick={(ev) => { ev.stopPropagation(); onClickEdge && onClickEdge(e); }}
-          />
-        );
-      })}
+      <primitive
+        object={mesh}
+        onPointerMove={(e) => {
+          if (e.faceIndex != null && edgeLookup[e.faceIndex]) {
+            cancelClear();
+            if (onHoverEdge && hoveredIndex !== e.faceIndex) onHoverEdge(e.faceIndex);
+          }
+        }}
+        onPointerOut={(e) => {
+          e.stopPropagation();
+          scheduleClear();
+        }}
+        onClick={(e) => {
+          e.stopPropagation();
+          if (e.faceIndex != null && onClickEdge && edgeLookup[e.faceIndex]) {
+            onClickEdge(edgeLookup[e.faceIndex]);
+          }
+        }}
+      />
+      {hoveredEdge && (
+        <Line
+          points={[hoveredEdge.from, hoveredEdge.to]}
+          color="#ffffff"
+          lineWidth={widthHover}
+          transparent
+          opacity={Math.min(1, opacity + 0.2)}
+          raycast={() => null}
+        />
+      )}
     </>
   );
 }
@@ -3091,8 +3187,8 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
               hoveredIndex={hoveredAllEdgeIdx}
               onHoverEdge={setHoveredAllEdgeIdx}
               onClickEdge={clickEdge}
-              widthBase={1.8}
-              widthHover={3.5}
+              widthBase={2.2}
+              widthHover={4.0}
             />
           )}
           {linesMode !== "off" && focused && (
@@ -3102,8 +3198,8 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
               hoveredIndex={hoveredEdgeIdx}
               onHoverEdge={setHoveredEdgeIdx}
               onClickEdge={clickEdge}
-              widthBase={3.0}
-              widthHover={5.0}
+              widthBase={4.0}
+              widthHover={7.0}
             />
           )}
           <EdgeTooltip
