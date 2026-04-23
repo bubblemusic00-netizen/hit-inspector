@@ -3639,49 +3639,52 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
 
   const handleSearchResultClick = (item) => {
     setSearch("");
+    const n = item.node;
 
-    // "All on" — every layer toggle visible to the user is currently
-    // enabled AND no filter is already narrowing the view. This is the
-    // fresh/default state. When the user searches from here they mean
-    // "isolate just this" — so we narrow the filters to the picked
-    // item's subtree. If they've already customized (turned off a
-    // layer or applied a filter), we leave their setup alone and just
-    // focus — no surprise changes to their curated view.
-    const allOn =
-      layers.bigs && layers.mids &&
-      (!layout.hasSmalls || layers.smalls) &&
-      (!layout.hasAttrs || layers.attributes);
-    const noFilters =
-      !filters.bigs && !filters.mids && !filters.smalls &&
-      !filters.attrCats && !filters.attrs;
-
-    if (allOn && noFilters) {
-      const n = item.node;
-      if (item.kind === "big") {
-        setFilters(f => ({ ...f, bigs: new Set([n.name]) }));
-      } else if (item.kind === "mid") {
-        setFilters(f => ({
-          ...f,
-          bigs: new Set([n.parent]),
-          mids: new Set([n.name]),
-        }));
-      } else if (item.kind === "small") {
-        setFilters(f => ({
-          ...f,
-          bigs:   new Set([n.grandparent]),
-          mids:   new Set([n.parent]),
-          smalls: new Set([smallKey(n)]),
-        }));
-      } else {
-        // Attribute: narrow to that attribute only. We don't also
-        // filter bigs/mids/smalls here because attributes cross-cut
-        // genres — the focus highlight will light up what connects.
-        setFilters(f => ({
-          ...f,
-          attrCats: new Set([n.categoryId]),
-          attrs:    new Set([attrKey(n)]),
-        }));
-      }
+    // Always rewire filters to the picked item + its subtree. Previously
+    // we only did this when the user hadn't customized anything yet —
+    // which meant the first pick narrowed correctly, but a SECOND pick
+    // (now that filters are no longer empty) just moved the focus
+    // highlight while the old subtree stayed on screen. That was the
+    // "turns off everything from the same category" confusion in the
+    // user report: picking "Rock" after first picking "Hip-Hop" left
+    // Hip-Hop's subtree visible and Rock invisible (because Rock wasn't
+    // in filter.bigs), so the UI looked broken.
+    //
+    // We also explicitly clear downstream filters so stale levels from
+    // a previous narrow don't linger. Example: first pick narrowed mids
+    // to { Afro Drill }. User then picks Hip-Hop (a big). Without the
+    // `mids: null` clear, visibleMids would stay filtered to Afro Drill
+    // even though the user picked a broader scope.
+    if (item.kind === "big") {
+      setFilters(f => ({
+        ...f,
+        bigs: new Set([n.name]),
+        mids: null, smalls: null,
+      }));
+    } else if (item.kind === "mid") {
+      setFilters(f => ({
+        ...f,
+        bigs: new Set([n.parent]),
+        mids: new Set([n.name]),
+        smalls: null,
+      }));
+    } else if (item.kind === "small") {
+      setFilters(f => ({
+        ...f,
+        bigs:   new Set([n.grandparent]),
+        mids:   new Set([n.parent]),
+        smalls: new Set([smallKey(n)]),
+      }));
+    } else {
+      // Attribute: narrow attrCats + attrs to that attribute only. We
+      // don't touch bigs/mids/smalls because attributes cross-cut the
+      // genre tree — the focus highlight will light up what connects.
+      setFilters(f => ({
+        ...f,
+        attrCats: new Set([n.categoryId]),
+        attrs:    new Set([attrKey(n)]),
+      }));
     }
 
     if (item.kind === "big") selectBig(item.node);
