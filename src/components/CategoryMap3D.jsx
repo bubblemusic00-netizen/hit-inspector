@@ -3425,7 +3425,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
     attr:  "auto",  // attributes
   });
   const [lineOpacity, setLineOpacity] = useState(1.0);   // 0 = invisible, 1 = full
-  const [allLinesOpacity, setAllLinesOpacity] = useState(0.22); // base for "on" mode
+  const [allLinesOpacity, setAllLinesOpacity] = useState(0.08); // base for "on" mode
   const [rotateSpeed, setRotateSpeed] = useState(0.18);  // very slow — full rotation ~5 min
   const [bgStars, setBgStars] = useState({ on: true, count: 2000, speed: 0.2 });
 
@@ -3968,7 +3968,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
     setNodeSizes({ big: 1.0, mid: 1.0, small: 1.0, attr: 1.0 });
     setLabelOpts({ big: "on", mid: "auto", small: "auto", attr: "auto" });
     setLineOpacity(1.0);
-    setAllLinesOpacity(0.22);
+    setAllLinesOpacity(0.08);
     setRotateSpeed(0.18);
     setBgStars({ on: true, count: 2000, speed: 0.2 });
   };
