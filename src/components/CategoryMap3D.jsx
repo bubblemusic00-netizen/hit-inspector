@@ -127,46 +127,145 @@ const MID_ORBIT  = 5.0;
 const SMALL_ORBIT= 1.8;    // was 1.0 — give micros breathing room so
                            // they don't clip into the sub when scaled up
 
-// ── Musical note geometry ─────────────────────────────────────────
-// Unit-sized quarter note (♩). Head at origin, stem extends up-right.
-// Instances scale this per-tier via their `scale` prop, so we only
-// build the geometry once and share it across every node in the scene.
-function mergeTwoGeos(a, b) {
-  const na = a.index ? a.toNonIndexed() : a;
-  const nb = b.index ? b.toNonIndexed() : b;
-  const pa = na.getAttribute("position");
-  const pb = nb.getAttribute("position");
-  const nra = na.getAttribute("normal");
-  const nrb = nb.getAttribute("normal");
-  const total = pa.count + pb.count;
+// ── Musical note geometry (compound: body + stem + cap + flag) ─────
+// Ported and simplified from the MusicPlanet design. Each part has a
+// scalar vertex "tint" baked in (body=1.0 brightest, stem=0.35 darkest,
+// flag=0.8, etc.) — when the material has `vertexColors: true`, these
+// tints multiply with the instance color so a red genre gets a vivid
+// red body with dark-red stem & flag, blue gets blue/dark-blue, etc.
+// The decorative ring is included only in the big-tier geometry — rings
+// would visually clash at sub/micro density.
+
+// Merge N non-indexed BufferGeometries into one, preserving the
+// position / normal / color attributes.
+function mergeGeos(geoms) {
+  const nonIdx = geoms.map(g => g.index ? g.toNonIndexed() : g);
+  const hasColor = nonIdx.every(g => g.getAttribute("color"));
+  let total = 0;
+  for (const g of nonIdx) total += g.getAttribute("position").count;
+
   const pos = new Float32Array(total * 3);
   const nrm = new Float32Array(total * 3);
-  pos.set(pa.array, 0);
-  pos.set(pb.array, pa.count * 3);
-  nrm.set(nra.array, 0);
-  nrm.set(nrb.array, pa.count * 3);
+  const col = hasColor ? new Float32Array(total * 3) : null;
+  let off = 0;
+  for (const g of nonIdx) {
+    const p = g.getAttribute("position");
+    const n = g.getAttribute("normal");
+    pos.set(p.array, off * 3);
+    nrm.set(n.array, off * 3);
+    if (hasColor) col.set(g.getAttribute("color").array, off * 3);
+    off += p.count;
+  }
   const merged = new THREE.BufferGeometry();
   merged.setAttribute("position", new THREE.BufferAttribute(pos, 3));
   merged.setAttribute("normal", new THREE.BufferAttribute(nrm, 3));
+  if (hasColor) merged.setAttribute("color", new THREE.BufferAttribute(col, 3));
   merged.computeBoundingSphere();
   return merged;
 }
 
-function makeNoteGeometry() {
-  // Note head — oval (ellipsoid), tilted so the stem looks attached to
-  // the top-right corner like a real quarter note.
-  const head = new THREE.SphereGeometry(1, 16, 12);
-  head.scale(1.3, 0.9, 0.9);
-  head.rotateZ(-Math.PI / 10); // ~18° tilt — standard musical-notation angle
-
-  // Stem — thin cylinder going up from the right edge of the head.
-  const stem = new THREE.CylinderGeometry(0.1, 0.1, 3.0, 8, 1);
-  stem.translate(1.08, 1.45, 0);
-
-  return mergeTwoGeos(head, stem);
+// Duplicate a geometry's vertices (force non-indexed) and paint every vertex
+// with the same grey tint value. When the material has `vertexColors: true`,
+// this tint multiplies with the instance color.
+function withTint(geom, tint) {
+  const g = geom.index ? geom.toNonIndexed() : geom.clone();
+  const n = g.getAttribute("position").count;
+  const colors = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    colors[i*3] = tint; colors[i*3+1] = tint; colors[i*3+2] = tint;
+  }
+  g.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+  return g;
 }
 
-const NOTE_GEOM = makeNoteGeometry();
+function makeNoteGeometry({ withRing = false, detail = "med" } = {}) {
+  const parts = [];
+  const segW = detail === "hi" ? 22 : 14;
+  const segH = detail === "hi" ? 16 : 10;
+
+  // Body — the "planet" sphere. Full-brightness tint.
+  const body = new THREE.SphereGeometry(1.0, segW, segH);
+  parts.push(withTint(body, 1.0));
+
+  // Optional decorative ring (bigs only — too busy on dense tiers).
+  if (withRing) {
+    const ring = new THREE.TorusGeometry(1.55, 0.12, 6, detail === "hi" ? 40 : 24);
+    ring.scale(1, 1, 0.1);
+    ring.rotateX(Math.PI / 2 - 0.38);
+    ring.rotateZ(0.22);
+    parts.push(withTint(ring, 0.85));
+  }
+
+  // Stem — shorter than the MusicPlanet original (1.6 vs 2.6) so that
+  // vertically-stacked notes don't clobber each other when packed tightly.
+  const stemR = 0.13;
+  const stemH = 1.6;
+  const stemX = 0.72;
+  const stemY = stemH / 2 + 0.45;
+  const stem = new THREE.CylinderGeometry(stemR * 0.8, stemR, stemH, detail === "hi" ? 12 : 8);
+  stem.translate(stemX, stemY, 0);
+  parts.push(withTint(stem, 0.38));
+
+  // Cap at the top of the stem.
+  const cap = new THREE.SphereGeometry(stemR * 1.25, 8, 6);
+  cap.translate(stemX, stemY + stemH / 2, 0);
+  parts.push(withTint(cap, 0.55));
+
+  // Flag — curved bezier tail hanging off the stem top. Scaled down
+  // from the MusicPlanet source so it fits the shorter stem.
+  const s = new THREE.Shape();
+  s.moveTo(0, 0);
+  s.bezierCurveTo(0.72, -0.02, 1.10, -0.48, 0.96, -1.10);
+  s.bezierCurveTo(0.86, -1.48, 0.52, -1.62, 0.15, -1.68);
+  s.bezierCurveTo(0.58, -1.40, 0.70, -1.00, 0.57, -0.65);
+  s.bezierCurveTo(0.40, -0.30, 0.18, -0.11, 0, 0);
+  s.lineTo(0, 0);
+  const flag = new THREE.ExtrudeGeometry(s, {
+    depth: 0.15,
+    bevelEnabled: true,
+    bevelThickness: 0.035, bevelSize: 0.035,
+    bevelSegments: detail === "hi" ? 3 : 1,
+    curveSegments: detail === "hi" ? 8 : 6,
+  });
+  flag.translate(stemX + stemR * 0.4, stemY + stemH / 2 - 0.04, -0.075);
+  flag.computeVertexNormals();
+  parts.push(withTint(flag, 0.8));
+
+  return mergeGeos(parts);
+}
+
+// Hi-detail compound WITH the tilted ring — used only for the 18 big
+// genre nodes (cheap to render, big visual payoff).
+const BIG_NOTE_GEOM = makeNoteGeometry({ withRing: true, detail: "hi" });
+// Medium-detail compound WITHOUT the ring — used for every other tier
+// (mids / smalls / attrs), where we might be drawing 1500+ instances.
+const NOTE_GEOM     = makeNoteGeometry({ withRing: false, detail: "med" });
+
+// Polished, softly-glowing material factory. Used for instanced tiers
+// where emissive color needs to follow the per-instance color. A tiny
+// shader-mod adds `vColor * uGlow` to the emissive output — `vColor`
+// already carries (vertex tint × instance color), so each note glows
+// in its own color without any per-instance material overhead.
+function buildGlowyInstancedMaterial({ metalness = 0.55, roughness = 0.28, glow = 0.35 } = {}) {
+  const m = new THREE.MeshStandardMaterial({
+    color: 0xffffff,
+    vertexColors: true,
+    metalness, roughness,
+    toneMapped: false,
+  });
+  m.onBeforeCompile = (shader) => {
+    shader.uniforms.uGlow = { value: glow };
+    shader.fragmentShader = shader.fragmentShader.replace(
+      "#include <emissivemap_fragment>",
+      "#include <emissivemap_fragment>\n    totalEmissiveRadiance += vColor * uGlow;"
+    );
+  };
+  return m;
+}
+
+const MAT_MID   = buildGlowyInstancedMaterial({ metalness: 0.55, roughness: 0.28, glow: 0.38 });
+const MAT_SMALL = buildGlowyInstancedMaterial({ metalness: 0.50, roughness: 0.30, glow: 0.32 });
+const MAT_ATTR  = buildGlowyInstancedMaterial({ metalness: 0.50, roughness: 0.30, glow: 0.40 });
 
 // ── Math helpers ─────────────────────────────────────────────────────
 function fibSphere(n) {
@@ -1094,11 +1193,12 @@ function BigNodes({ bigs, focused, layout, onSelect, onHover, sizeMult = 1, show
               onPointerOver={e => { e.stopPropagation(); onHover(b); }}
               onPointerOut={e => { e.stopPropagation(); onHover(null); }}
             >
-              <primitive object={NOTE_GEOM} attach="geometry" />
+              <primitive object={BIG_NOTE_GEOM} attach="geometry" />
               <meshStandardMaterial
                 color={b.color} emissive={b.color}
-                emissiveIntensity={isF ? 2.6 : (dim ? 0.3 : 1.2)}
-                metalness={0.55} roughness={0.28}
+                emissiveIntensity={isF ? 2.4 : (dim ? 0.3 : 1.1)}
+                metalness={0.6} roughness={0.25}
+                vertexColors
                 toneMapped={false} opacity={dim ? 0.45 : 1} transparent={dim}
               />
             </mesh>
@@ -1127,7 +1227,7 @@ function MidNodes({ mids, focused, layout, onSelect, onHover, sizeMult = 1 }) {
   return (
     <Instances limit={Math.max(mids.length, 1)} range={mids.length}>
       <primitive object={NOTE_GEOM} attach="geometry" />
-      <meshStandardMaterial emissiveIntensity={1.0} metalness={0.55} roughness={0.3} toneMapped={false} />
+      <primitive object={MAT_MID} attach="material" />
       {mids.map(s => {
         const isF = focused?.kind === "mid" && focused.name === s.name && focused.parent === s.parent;
         const rel = isMidRelated(s, focused, layout);
@@ -1149,7 +1249,7 @@ function SmallNodes({ smalls, focused, onSelect, onHover, sizeMult = 1 }) {
   return (
     <Instances limit={Math.max(smalls.length, 1)} range={smalls.length}>
       <primitive object={NOTE_GEOM} attach="geometry" />
-      <meshStandardMaterial emissiveIntensity={0.85} metalness={0.5} roughness={0.32} toneMapped={false} />
+      <primitive object={MAT_SMALL} attach="material" />
       {smalls.map(m => {
         const isF = focused?.kind === "small" && focused.name === m.name && focused.parent === m.parent && focused.grandparent === m.grandparent;
         const inMid = focused?.kind === "mid" && focused.name === m.parent && focused.parent === m.grandparent;
@@ -1173,7 +1273,7 @@ function AttributeNodes({ attributes, focused, layout, onSelect, onHover, sizeMu
   return (
     <Instances limit={Math.max(attributes.length, 1)} range={attributes.length}>
       <primitive object={NOTE_GEOM} attach="geometry" />
-      <meshStandardMaterial emissiveIntensity={1.0} metalness={0.5} roughness={0.3} toneMapped={false} />
+      <primitive object={MAT_ATTR} attach="material" />
       {attributes.map(a => {
         const isF = focused?.kind === "attribute" && focused.name === a.name && focused.categoryId === a.categoryId;
         const rel = isAttrRelated(a, focused, layout);
