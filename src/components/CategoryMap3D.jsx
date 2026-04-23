@@ -178,14 +178,43 @@ function withTint(geom, tint) {
   return g;
 }
 
+// Like withTint, but paints the sphere body with 4 latitude bands of
+// differing brightness — reproduces the "gas-giant" striping effect from
+// the MusicPlanet palette (light top, medium, dark-medium, dark bottom).
+// A gentle longitudinal sine wave makes the band edges feel organic
+// instead of perfectly horizontal.
+function bandedBody(geom) {
+  const g = geom.index ? geom.toNonIndexed() : geom.clone();
+  const pos = g.getAttribute("position");
+  const n = pos.count;
+  const colors = new Float32Array(n * 3);
+  // Band brightnesses — lifted from MusicPlanet's HSL lightness values
+  // (0.88, 0.62, 0.38, 0.14) but brightened a bit so dark bands don't
+  // look black when multiplied by darker instance colors.
+  const tints = [0.95, 0.78, 0.55, 0.35];
+  for (let i = 0; i < n; i++) {
+    const y = pos.getY(i);
+    const x = pos.getX(i);
+    const z = pos.getZ(i);
+    const lat = (y + 1) * 0.5;             // 0 (south pole) → 1 (north pole)
+    const wave = Math.sin(x * 5 + z * 4) * 0.035;
+    const t = Math.max(0, Math.min(0.999, lat + wave));
+    const band = Math.floor(t * 4);
+    const tint = tints[band];
+    colors[i*3] = tint; colors[i*3+1] = tint; colors[i*3+2] = tint;
+  }
+  g.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+  return g;
+}
+
 function makeNoteGeometry({ withRing = false, detail = "med" } = {}) {
   const parts = [];
-  const segW = detail === "hi" ? 22 : 14;
-  const segH = detail === "hi" ? 16 : 10;
+  const segW = detail === "hi" ? 24 : 18;
+  const segH = detail === "hi" ? 18 : 12;
 
-  // Body — the "planet" sphere. Full-brightness tint.
+  // Body — the "planet" sphere, with 4-band lightness pattern.
   const body = new THREE.SphereGeometry(1.0, segW, segH);
-  parts.push(withTint(body, 1.0));
+  parts.push(bandedBody(body));
 
   // Optional decorative ring (bigs only — too busy on dense tiers).
   if (withRing) {
@@ -241,31 +270,25 @@ const BIG_NOTE_GEOM = makeNoteGeometry({ withRing: true, detail: "hi" });
 // (mids / smalls / attrs), where we might be drawing 1500+ instances.
 const NOTE_GEOM     = makeNoteGeometry({ withRing: false, detail: "med" });
 
-// Polished, softly-glowing material factory. Used for instanced tiers
-// where emissive color needs to follow the per-instance color. A tiny
-// shader-mod adds `vColor * uGlow` to the emissive output — `vColor`
-// already carries (vertex tint × instance color), so each note glows
-// in its own color without any per-instance material overhead.
-function buildGlowyInstancedMaterial({ metalness = 0.55, roughness = 0.28, glow = 0.35 } = {}) {
-  const m = new THREE.MeshStandardMaterial({
+// Polished, softly-glowing instanced material. Uses a uniform emissive
+// level (not per-instance) for reliability — shader modifications via
+// onBeforeCompile are fragile and can silently fail across devices.
+// The per-instance color still comes through via instance color ×
+// vertex tint, which gives each note a vivid, individualized look.
+function buildGlowyInstancedMaterial({ metalness = 0.4, roughness = 0.4, emissive = 0x444444 } = {}) {
+  return new THREE.MeshStandardMaterial({
     color: 0xffffff,
     vertexColors: true,
     metalness, roughness,
+    emissive,
+    emissiveIntensity: 0.55,
     toneMapped: false,
   });
-  m.onBeforeCompile = (shader) => {
-    shader.uniforms.uGlow = { value: glow };
-    shader.fragmentShader = shader.fragmentShader.replace(
-      "#include <emissivemap_fragment>",
-      "#include <emissivemap_fragment>\n    totalEmissiveRadiance += vColor * uGlow;"
-    );
-  };
-  return m;
 }
 
-const MAT_MID   = buildGlowyInstancedMaterial({ metalness: 0.55, roughness: 0.28, glow: 0.38 });
-const MAT_SMALL = buildGlowyInstancedMaterial({ metalness: 0.50, roughness: 0.30, glow: 0.32 });
-const MAT_ATTR  = buildGlowyInstancedMaterial({ metalness: 0.50, roughness: 0.30, glow: 0.40 });
+const MAT_MID   = buildGlowyInstancedMaterial({ metalness: 0.42, roughness: 0.38, emissive: 0x4a4a4a });
+const MAT_SMALL = buildGlowyInstancedMaterial({ metalness: 0.38, roughness: 0.42, emissive: 0x3e3e3e });
+const MAT_ATTR  = buildGlowyInstancedMaterial({ metalness: 0.38, roughness: 0.40, emissive: 0x484848 });
 
 // ── Math helpers ─────────────────────────────────────────────────────
 function fibSphere(n) {
@@ -1177,116 +1200,278 @@ function isAttrRelated(attr, focused, layout) {
 
 // ── 3D Components ──────────────────────────────────────────────────
 
+// One rotating note for a big (genre hub). Kept as its own component so
+// each big has its own ref + useFrame spinning loop. Label sits OUTSIDE
+// the rotating group so text stays horizontal while the note turns.
+function BigNoteNode({ b, focused, sizeMult, showLabel, onSelect, onHover }) {
+  const spinRef = useRef();
+  const sp = useMemo(() => {
+    const s = hash01(b.name + "/spin");
+    return { speed: 0.08 + s * 0.18, phase: s * Math.PI * 2 };
+  }, [b.name]);
+  useFrame((_, dt) => {
+    if (spinRef.current) spinRef.current.rotation.y += dt * sp.speed;
+  });
+
+  const isF = focused?.kind === "big" && focused.name === b.name;
+  const related =
+    (focused?.kind === "mid"   && focused.parent === b.name) ||
+    (focused?.kind === "small" && focused.grandparent === b.name);
+  const dim = focused && !isF && !related;
+
+  return (
+    <group position={b.pos} scale={sizeMult * BIG_R}>
+      <group ref={spinRef} rotation={[0, sp.phase, 0]}>
+        <mesh
+          onClick={e => { e.stopPropagation(); onSelect(b); }}
+          onPointerOver={e => { e.stopPropagation(); onHover(b); }}
+          onPointerOut={e => { e.stopPropagation(); onHover(null); }}
+        >
+          <primitive object={BIG_NOTE_GEOM} attach="geometry" />
+          <meshStandardMaterial
+            color={b.color} emissive={b.color}
+            emissiveIntensity={isF ? 2.4 : (dim ? 0.3 : 1.1)}
+            metalness={0.6} roughness={0.25}
+            vertexColors
+            toneMapped={false} opacity={dim ? 0.45 : 1} transparent={dim}
+          />
+        </mesh>
+      </group>
+      {showLabel && (
+        <Html center distanceFactor={34} style={{ pointerEvents: "none" }}>
+          <div style={{
+            color: "#fff", fontSize: isF ? 13 : 11,
+            fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+            fontWeight: isF ? 700 : 500, letterSpacing: "0.02em",
+            background: isF ? "rgba(94,106,210,0.96)" : "rgba(10,10,15,0.78)",
+            padding: "2px 7px", borderRadius: 4, whiteSpace: "nowrap",
+            transform: "translate(-50%, 24px)", position: "absolute",
+            opacity: dim ? 0.4 : 1, userSelect: "none",
+          }}>{b.name}</div>
+        </Html>
+      )}
+    </group>
+  );
+}
+
 function BigNodes({ bigs, focused, layout, onSelect, onHover, sizeMult = 1, showLabel = true }) {
   return (
     <>
-      {bigs.map(b => {
-        const isF = focused?.kind === "big" && focused.name === b.name;
-        const related =
-          (focused?.kind === "mid"   && focused.parent === b.name) ||
-          (focused?.kind === "small" && focused.grandparent === b.name);
-        const dim = focused && !isF && !related;
-        return (
-          <group key={b.name} position={b.pos} scale={sizeMult * BIG_R}>
-            <mesh
-              onClick={e => { e.stopPropagation(); onSelect(b); }}
-              onPointerOver={e => { e.stopPropagation(); onHover(b); }}
-              onPointerOut={e => { e.stopPropagation(); onHover(null); }}
-            >
-              <primitive object={BIG_NOTE_GEOM} attach="geometry" />
-              <meshStandardMaterial
-                color={b.color} emissive={b.color}
-                emissiveIntensity={isF ? 2.4 : (dim ? 0.3 : 1.1)}
-                metalness={0.6} roughness={0.25}
-                vertexColors
-                toneMapped={false} opacity={dim ? 0.45 : 1} transparent={dim}
-              />
-            </mesh>
-            {showLabel && (
-              <Html center distanceFactor={34} style={{ pointerEvents: "none" }}>
-                <div style={{
-                  color: "#fff", fontSize: isF ? 13 : 11,
-                  fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-                  fontWeight: isF ? 700 : 500, letterSpacing: "0.02em",
-                  background: isF ? "rgba(94,106,210,0.96)" : "rgba(10,10,15,0.78)",
-                  padding: "2px 7px", borderRadius: 4, whiteSpace: "nowrap",
-                  transform: "translate(-50%, 24px)", position: "absolute",
-                  opacity: dim ? 0.4 : 1, userSelect: "none",
-                }}>{b.name}</div>
-              </Html>
-            )}
-          </group>
-        );
-      })}
+      {bigs.map(b => (
+        <BigNoteNode key={b.name} b={b} focused={focused}
+          sizeMult={sizeMult} showLabel={showLabel}
+          onSelect={onSelect} onHover={onHover} />
+      ))}
     </>
   );
 }
 
+// Mids — raw InstancedMesh so we can mutate per-instance matrices every
+// frame (for the self-spin). Colors are written once via setColorAt;
+// matrices are rewritten each frame with focus scale + spin angle.
 function MidNodes({ mids, focused, layout, onSelect, onHover, sizeMult = 1 }) {
+  const meshRef = useRef();
+  const tmpObj = useMemo(() => new THREE.Object3D(), []);
+  const tmpColor = useMemo(() => new THREE.Color(), []);
+
+  const spinData = useMemo(() => mids.map(m => {
+    const s = hash01(m.parent + "/" + m.name + "/spin");
+    return { phase: s * Math.PI * 2, speed: 0.15 + s * 0.35 };
+  }), [mids]);
+
+  useEffect(() => {
+    const mesh = meshRef.current;
+    if (!mesh || !mids.length) return;
+    for (let i = 0; i < mids.length; i++) {
+      tmpColor.set(mids[i].color);
+      mesh.setColorAt(i, tmpColor);
+    }
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+  }, [mids, tmpColor]);
+
+  useFrame(({ clock }) => {
+    const mesh = meshRef.current;
+    if (!mesh || !mids.length) return;
+    const t = clock.elapsedTime;
+    for (let i = 0; i < mids.length; i++) {
+      const s = mids[i];
+      const sd = spinData[i];
+      const isF = focused?.kind === "mid" && focused.name === s.name && focused.parent === s.parent;
+      const rel = isMidRelated(s, focused, layout);
+      const dim = focused && !rel;
+      const scl = isF ? 1.75 : (rel && focused ? 1.25 : (dim ? 0.35 : 1));
+      tmpObj.position.set(s.pos[0], s.pos[1], s.pos[2]);
+      tmpObj.rotation.set(0, sd.phase + t * sd.speed, 0);
+      tmpObj.scale.setScalar(scl * sizeMult * MID_R);
+      tmpObj.updateMatrix();
+      mesh.setMatrixAt(i, tmpObj.matrix);
+    }
+    mesh.instanceMatrix.needsUpdate = true;
+  });
+
   if (!mids.length) return null;
   return (
-    <Instances limit={Math.max(mids.length, 1)} range={mids.length}>
+    <instancedMesh
+      ref={meshRef}
+      args={[undefined, undefined, mids.length]}
+      onClick={e => { e.stopPropagation(); if (e.instanceId != null) onSelect(mids[e.instanceId]); }}
+      onPointerOver={e => { e.stopPropagation(); if (e.instanceId != null) onHover(mids[e.instanceId]); }}
+      onPointerOut={e => { e.stopPropagation(); onHover(null); }}
+    >
       <primitive object={NOTE_GEOM} attach="geometry" />
       <primitive object={MAT_MID} attach="material" />
-      {mids.map(s => {
-        const isF = focused?.kind === "mid" && focused.name === s.name && focused.parent === s.parent;
-        const rel = isMidRelated(s, focused, layout);
-        const dim = focused && !rel;
-        const scl = isF ? 1.75 : (rel && focused ? 1.25 : (dim ? 0.35 : 1));
-        return (
-          <Instance key={s.parent + "/" + s.name} position={s.pos} color={s.color} scale={scl * sizeMult * MID_R}
-            onPointerOver={e => { e.stopPropagation(); onHover(s); }}
-            onPointerOut={e => { e.stopPropagation(); onHover(null); }}
-            onClick={e => { e.stopPropagation(); onSelect(s); }} />
-        );
-      })}
-    </Instances>
+    </instancedMesh>
   );
 }
 
-function SmallNodes({ smalls, focused, onSelect, onHover, sizeMult = 1 }) {
+// Smalls — orbit around their parent mid (like moons around a planet)
+// AND self-rotate. The initial offset from parent is taken from the
+// layout-time position; we rotate that offset around a per-small random
+// axis each frame, keeping the orbit plane stable but different for
+// every micro so they don't all orbit in the same plane.
+function SmallNodes({ smalls, focused, onSelect, onHover, sizeMult = 1, layout }) {
+  const meshRef = useRef();
+  const tmpObj = useMemo(() => new THREE.Object3D(), []);
+  const tmpColor = useMemo(() => new THREE.Color(), []);
+  const tmpVec = useMemo(() => new THREE.Vector3(), []);
+  const tmpAxis = useMemo(() => new THREE.Vector3(), []);
+  const tmpQuat = useMemo(() => new THREE.Quaternion(), []);
+
+  const orbitData = useMemo(() => {
+    const midLookup = (sName, gName) =>
+      layout?.midsByKey?.[sName + "/" + gName] ||
+      layout?.midsByKey?.[sName] ||
+      layout?.mids?.find(x => x.name === sName && (!gName || x.parent === gName));
+    return smalls.map(s => {
+      const parent = midLookup(s.parent, s.grandparent);
+      const cx = parent?.pos?.[0] ?? s.pos[0];
+      const cy = parent?.pos?.[1] ?? s.pos[1];
+      const cz = parent?.pos?.[2] ?? s.pos[2];
+      const seed = hash01(s.grandparent + "/" + s.parent + "/" + s.name);
+      // Random rotation axis per-small (deterministic via hash) so each
+      // moon has a unique orbital plane.
+      const ax = Math.sin(seed * 7.13);
+      const ay = Math.cos(seed * 5.81);
+      const az = Math.sin(seed * 3.43 + 1.1);
+      const aLen = Math.sqrt(ax*ax + ay*ay + az*az) || 1;
+      return {
+        cx, cy, cz,
+        ox: s.pos[0] - cx, oy: s.pos[1] - cy, oz: s.pos[2] - cz,
+        axx: ax / aLen, axy: ay / aLen, axz: az / aLen,
+        orbitSpeed: 0.05 + seed * 0.12,   // slow (Earth-around-sun pace)
+        orbitPhase: seed * Math.PI * 2,
+        spinSpeed: 0.3 + seed * 0.6,      // faster self-rotation
+        spinPhase: (1 - seed) * Math.PI * 2,
+      };
+    });
+  }, [smalls, layout]);
+
+  useEffect(() => {
+    const mesh = meshRef.current;
+    if (!mesh || !smalls.length) return;
+    for (let i = 0; i < smalls.length; i++) {
+      tmpColor.set(smalls[i].color);
+      mesh.setColorAt(i, tmpColor);
+    }
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+  }, [smalls, tmpColor]);
+
+  useFrame(({ clock }) => {
+    const mesh = meshRef.current;
+    if (!mesh || !smalls.length) return;
+    const t = clock.elapsedTime;
+    for (let i = 0; i < smalls.length; i++) {
+      const m = smalls[i];
+      const d = orbitData[i];
+      const isF = focused?.kind === "small" && focused.name === m.name && focused.parent === m.parent && focused.grandparent === m.grandparent;
+      const inMid = focused?.kind === "mid" && focused.name === m.parent && focused.parent === m.grandparent;
+      const inBig = focused?.kind === "big" && focused.name === m.grandparent;
+      const dim = focused && !(isF || inMid || inBig);
+      const scl = isF ? 2.4 : (inMid ? 1.35 : (dim ? 0.3 : 1));
+
+      // Orbit: rotate the initial offset vector around the random axis.
+      tmpAxis.set(d.axx, d.axy, d.axz);
+      tmpQuat.setFromAxisAngle(tmpAxis, d.orbitPhase + t * d.orbitSpeed);
+      tmpVec.set(d.ox, d.oy, d.oz).applyQuaternion(tmpQuat);
+      tmpObj.position.set(d.cx + tmpVec.x, d.cy + tmpVec.y, d.cz + tmpVec.z);
+      // Self-spin — simple Y rotation, faster than orbit.
+      tmpObj.rotation.set(0, d.spinPhase + t * d.spinSpeed, 0);
+      tmpObj.scale.setScalar(scl * sizeMult * SMALL_R);
+      tmpObj.updateMatrix();
+      mesh.setMatrixAt(i, tmpObj.matrix);
+    }
+    mesh.instanceMatrix.needsUpdate = true;
+  });
+
   if (!smalls.length) return null;
   return (
-    <Instances limit={Math.max(smalls.length, 1)} range={smalls.length}>
+    <instancedMesh
+      ref={meshRef}
+      args={[undefined, undefined, smalls.length]}
+      onClick={e => { e.stopPropagation(); if (e.instanceId != null) onSelect(smalls[e.instanceId]); }}
+      onPointerOver={e => { e.stopPropagation(); if (e.instanceId != null) onHover(smalls[e.instanceId]); }}
+      onPointerOut={e => { e.stopPropagation(); onHover(null); }}
+    >
       <primitive object={NOTE_GEOM} attach="geometry" />
       <primitive object={MAT_SMALL} attach="material" />
-      {smalls.map(m => {
-        const isF = focused?.kind === "small" && focused.name === m.name && focused.parent === m.parent && focused.grandparent === m.grandparent;
-        const inMid = focused?.kind === "mid" && focused.name === m.parent && focused.parent === m.grandparent;
-        const inBig = focused?.kind === "big" && focused.name === m.grandparent;
-        const dim = focused && !(isF || inMid || inBig);
-        const scl = isF ? 2.4 : (inMid ? 1.35 : (dim ? 0.3 : 1));
-        return (
-          <Instance key={m.grandparent + "/" + m.parent + "/" + m.name}
-            position={m.pos} color={m.color} scale={scl * sizeMult * SMALL_R}
-            onPointerOver={e => { e.stopPropagation(); onHover(m); }}
-            onPointerOut={e => { e.stopPropagation(); onHover(null); }}
-            onClick={e => { e.stopPropagation(); onSelect(m); }} />
-        );
-      })}
-    </Instances>
+    </instancedMesh>
   );
 }
 
+// Attrs — self-rotate in place (no orbit, since they float in a cloud
+// that isn't parented to any single node).
 function AttributeNodes({ attributes, focused, layout, onSelect, onHover, sizeMult = 1 }) {
+  const meshRef = useRef();
+  const tmpObj = useMemo(() => new THREE.Object3D(), []);
+  const tmpColor = useMemo(() => new THREE.Color(), []);
+
+  const spinData = useMemo(() => attributes.map(a => {
+    const s = hash01(a.categoryId + ":" + a.name + "/spin");
+    return { phase: s * Math.PI * 2, speed: 0.18 + s * 0.4 };
+  }), [attributes]);
+
+  useEffect(() => {
+    const mesh = meshRef.current;
+    if (!mesh || !attributes.length) return;
+    for (let i = 0; i < attributes.length; i++) {
+      tmpColor.set(attributes[i].color);
+      mesh.setColorAt(i, tmpColor);
+    }
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+  }, [attributes, tmpColor]);
+
+  useFrame(({ clock }) => {
+    const mesh = meshRef.current;
+    if (!mesh || !attributes.length) return;
+    const t = clock.elapsedTime;
+    for (let i = 0; i < attributes.length; i++) {
+      const a = attributes[i];
+      const sd = spinData[i];
+      const isF = focused?.kind === "attribute" && focused.name === a.name && focused.categoryId === a.categoryId;
+      const rel = isAttrRelated(a, focused, layout);
+      const dim = focused && !isF && !rel;
+      const scl = isF ? 2.2 : (rel && focused ? 1.4 : (dim ? 0.4 : 1));
+      tmpObj.position.set(a.pos[0], a.pos[1], a.pos[2]);
+      tmpObj.rotation.set(0, sd.phase + t * sd.speed, 0);
+      tmpObj.scale.setScalar(scl * sizeMult * ATTR_R);
+      tmpObj.updateMatrix();
+      mesh.setMatrixAt(i, tmpObj.matrix);
+    }
+    mesh.instanceMatrix.needsUpdate = true;
+  });
+
   if (!attributes.length) return null;
   return (
-    <Instances limit={Math.max(attributes.length, 1)} range={attributes.length}>
+    <instancedMesh
+      ref={meshRef}
+      args={[undefined, undefined, attributes.length]}
+      onClick={e => { e.stopPropagation(); if (e.instanceId != null) onSelect(attributes[e.instanceId]); }}
+      onPointerOver={e => { e.stopPropagation(); if (e.instanceId != null) onHover(attributes[e.instanceId]); }}
+      onPointerOut={e => { e.stopPropagation(); onHover(null); }}
+    >
       <primitive object={NOTE_GEOM} attach="geometry" />
       <primitive object={MAT_ATTR} attach="material" />
-      {attributes.map(a => {
-        const isF = focused?.kind === "attribute" && focused.name === a.name && focused.categoryId === a.categoryId;
-        const rel = isAttrRelated(a, focused, layout);
-        const dim = focused && !isF && !rel;
-        const scl = isF ? 2.2 : (rel && focused ? 1.4 : (dim ? 0.4 : 1));
-        return (
-          <Instance key={a.categoryId + ":" + a.name} position={a.pos} color={a.color} scale={scl * sizeMult * ATTR_R}
-            onPointerOver={e => { e.stopPropagation(); onHover(a); }}
-            onPointerOut={e => { e.stopPropagation(); onHover(null); }}
-            onClick={e => { e.stopPropagation(); onSelect(a); }} />
-        );
-      })}
-    </Instances>
+    </instancedMesh>
   );
 }
 
@@ -2387,7 +2572,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
           )}
 
           {layout.hasSmalls && layers.mids && layers.smalls && (
-            <SmallNodes smalls={visibleSmalls} focused={focused} onSelect={selectSmall} onHover={setHovered}
+            <SmallNodes smalls={visibleSmalls} focused={focused} layout={layout} onSelect={selectSmall} onHover={setHovered}
                         sizeMult={nodeSizes.small} />
           )}
 
