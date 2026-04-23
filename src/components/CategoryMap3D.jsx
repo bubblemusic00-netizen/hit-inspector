@@ -1036,7 +1036,7 @@ function isAttrRelated(attr, focused, layout) {
 
 // ── 3D Components ──────────────────────────────────────────────────
 
-function BigNodes({ bigs, focused, layout, onSelect, onHover }) {
+function BigNodes({ bigs, focused, layout, onSelect, onHover, sizeMult = 1, showLabel = true }) {
   return (
     <>
       {bigs.map(b => {
@@ -1046,7 +1046,7 @@ function BigNodes({ bigs, focused, layout, onSelect, onHover }) {
           (focused?.kind === "small" && focused.grandparent === b.name);
         const dim = focused && !isF && !related;
         return (
-          <group key={b.name} position={b.pos}>
+          <group key={b.name} position={b.pos} scale={sizeMult}>
             <mesh
               onClick={e => { e.stopPropagation(); onSelect(b); }}
               onPointerOver={e => { e.stopPropagation(); onHover(b); }}
@@ -1059,17 +1059,19 @@ function BigNodes({ bigs, focused, layout, onSelect, onHover }) {
                 toneMapped={false} opacity={dim ? 0.45 : 1} transparent={dim}
               />
             </mesh>
-            <Html center distanceFactor={34} style={{ pointerEvents: "none" }}>
-              <div style={{
-                color: "#fff", fontSize: isF ? 13 : 11,
-                fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-                fontWeight: isF ? 700 : 500, letterSpacing: "0.02em",
-                background: isF ? "rgba(94,106,210,0.96)" : "rgba(10,10,15,0.78)",
-                padding: "2px 7px", borderRadius: 4, whiteSpace: "nowrap",
-                transform: "translate(-50%, 24px)", position: "absolute",
-                opacity: dim ? 0.4 : 1, userSelect: "none",
-              }}>{b.name}</div>
-            </Html>
+            {showLabel && (
+              <Html center distanceFactor={34} style={{ pointerEvents: "none" }}>
+                <div style={{
+                  color: "#fff", fontSize: isF ? 13 : 11,
+                  fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                  fontWeight: isF ? 700 : 500, letterSpacing: "0.02em",
+                  background: isF ? "rgba(94,106,210,0.96)" : "rgba(10,10,15,0.78)",
+                  padding: "2px 7px", borderRadius: 4, whiteSpace: "nowrap",
+                  transform: "translate(-50%, 24px)", position: "absolute",
+                  opacity: dim ? 0.4 : 1, userSelect: "none",
+                }}>{b.name}</div>
+              </Html>
+            )}
           </group>
         );
       })}
@@ -1077,7 +1079,7 @@ function BigNodes({ bigs, focused, layout, onSelect, onHover }) {
   );
 }
 
-function MidNodes({ mids, focused, layout, onSelect, onHover }) {
+function MidNodes({ mids, focused, layout, onSelect, onHover, sizeMult = 1 }) {
   if (!mids.length) return null;
   return (
     <Instances limit={Math.max(mids.length, 1)} range={mids.length}>
@@ -1089,7 +1091,7 @@ function MidNodes({ mids, focused, layout, onSelect, onHover }) {
         const dim = focused && !rel;
         const scl = isF ? 1.75 : (rel && focused ? 1.25 : (dim ? 0.35 : 1));
         return (
-          <Instance key={s.parent + "/" + s.name} position={s.pos} color={s.color} scale={scl}
+          <Instance key={s.parent + "/" + s.name} position={s.pos} color={s.color} scale={scl * sizeMult}
             onPointerOver={e => { e.stopPropagation(); onHover(s); }}
             onPointerOut={e => { e.stopPropagation(); onHover(null); }}
             onClick={e => { e.stopPropagation(); onSelect(s); }} />
@@ -1099,7 +1101,7 @@ function MidNodes({ mids, focused, layout, onSelect, onHover }) {
   );
 }
 
-function SmallNodes({ smalls, focused, onSelect, onHover }) {
+function SmallNodes({ smalls, focused, onSelect, onHover, sizeMult = 1 }) {
   if (!smalls.length) return null;
   return (
     <Instances limit={Math.max(smalls.length, 1)} range={smalls.length}>
@@ -1113,7 +1115,7 @@ function SmallNodes({ smalls, focused, onSelect, onHover }) {
         const scl = isF ? 2.4 : (inMid ? 1.35 : (dim ? 0.3 : 1));
         return (
           <Instance key={m.grandparent + "/" + m.parent + "/" + m.name}
-            position={m.pos} color={m.color} scale={scl}
+            position={m.pos} color={m.color} scale={scl * sizeMult}
             onPointerOver={e => { e.stopPropagation(); onHover(m); }}
             onPointerOut={e => { e.stopPropagation(); onHover(null); }}
             onClick={e => { e.stopPropagation(); onSelect(m); }} />
@@ -1123,7 +1125,7 @@ function SmallNodes({ smalls, focused, onSelect, onHover }) {
   );
 }
 
-function AttributeNodes({ attributes, focused, layout, onSelect, onHover }) {
+function AttributeNodes({ attributes, focused, layout, onSelect, onHover, sizeMult = 1 }) {
   if (!attributes.length) return null;
   return (
     <Instances limit={Math.max(attributes.length, 1)} range={attributes.length}>
@@ -1135,7 +1137,7 @@ function AttributeNodes({ attributes, focused, layout, onSelect, onHover }) {
         const dim = focused && !isF && !rel;
         const scl = isF ? 2.2 : (rel && focused ? 1.4 : (dim ? 0.4 : 1));
         return (
-          <Instance key={a.categoryId + ":" + a.name} position={a.pos} color={a.color} scale={scl}
+          <Instance key={a.categoryId + ":" + a.name} position={a.pos} color={a.color} scale={scl * sizeMult}
             onPointerOver={e => { e.stopPropagation(); onHover(a); }}
             onPointerOut={e => { e.stopPropagation(); onHover(null); }}
             onClick={e => { e.stopPropagation(); onSelect(a); }} />
@@ -1145,13 +1147,13 @@ function AttributeNodes({ attributes, focused, layout, onSelect, onHover }) {
   );
 }
 
-function FocusEdges({ lines, visible }) {
+function FocusEdges({ lines, visible, opacityMult = 1 }) {
   if (!visible || !lines.length) return null;
   return (
     <>
       {lines.map((l, i) => (
         <Line key={i} points={[l.from, l.to]} color={l.color} lineWidth={1.6}
-              transparent opacity={l.kind === "tree" ? 0.85 : l.kind === "attr" ? 0.65 : 0.5} />
+              transparent opacity={(l.kind === "tree" ? 0.85 : l.kind === "attr" ? 0.65 : 0.5) * opacityMult} />
       ))}
     </>
   );
@@ -1181,7 +1183,7 @@ function AllTreeLines({ edges, opacity = 0.22 }) {
     g.setAttribute("color", new THREE.BufferAttribute(colors, 3));
     return g;
   }, [edges]);
-  if (!geom) return null;
+  if (!geom || opacity <= 0) return null;
   return (
     <lineSegments geometry={geom}>
       <lineBasicMaterial vertexColors transparent opacity={opacity} depthWrite={false} />
@@ -1259,6 +1261,31 @@ function Toggle({ on, onChange, label, color, disabled }) {
     }}>
       <span style={{ width: 9, height: 9, borderRadius: "50%", flexShrink: 0, background: on ? color : "transparent", border: `1.5px solid ${color}` }} />
       <span style={{ fontSize: 12, fontFamily: T.fontMono, color: T.text }}>{label}</span>
+    </div>
+  );
+}
+
+function Slider({ value, onChange, min = 0, max = 100, step = 1, label, formatValue, disabled }) {
+  const display = formatValue ? formatValue(value) : String(value);
+  return (
+    <div style={{ padding: "5px 10px 3px", opacity: disabled ? 0.35 : 1 }}>
+      <div style={{
+        display: "flex", justifyContent: "space-between", alignItems: "baseline",
+        fontSize: 10, fontFamily: T.fontMono, marginBottom: 3,
+      }}>
+        <span style={{ color: T.textMuted, letterSpacing: ".04em" }}>{label}</span>
+        <span style={{ color: T.text, fontSize: 9, fontVariantNumeric: "tabular-nums" }}>{display}</span>
+      </div>
+      <input
+        type="range"
+        min={min} max={max} step={step} value={value}
+        onChange={e => onChange(parseFloat(e.target.value))}
+        disabled={disabled}
+        style={{
+          width: "100%", cursor: disabled ? "default" : "pointer",
+          accentColor: T.accent, display: "block", margin: 0,
+        }}
+      />
     </div>
   );
 }
@@ -1470,6 +1497,14 @@ function LayerPanel({
   filters, setFilters,
   search, setSearch,
   searchResults, onSearchResultClick,
+  nodeSizes, setNodeSizes,
+  labelOpts, setLabelOpts,
+  lineOpacity, setLineOpacity,
+  allLinesOpacity, setAllLinesOpacity,
+  rotateSpeed, setRotateSpeed,
+  bgStars, setBgStars,
+  glowIntensity, setGlowIntensity,
+  onResetCustomization,
 }) {
   // Panel is draggable by its header. Position is kept in local state —
   // resets to top-left when the category changes (outer component remounts).
@@ -1521,11 +1556,14 @@ function LayerPanel({
     });
   };
 
+  const pctFmt  = v => (v * 100).toFixed(0) + "%";
+  const multFmt = v => v.toFixed(1) + "×";
+
   return (
     <div style={{
       position: "absolute", top: pos.y, left: pos.x,
-      width: 260,
-      maxHeight: "calc(100vh - 160px)",
+      width: 268,
+      maxHeight: "calc(100vh - 120px)",
       overflowY: "auto",
       background: "rgba(10,10,15,0.94)",
       border: `1px solid ${T.borderHi}`,
@@ -1546,6 +1584,7 @@ function LayerPanel({
           background: "rgba(20,20,30,0.5)",
           userSelect: "none",
           borderTopLeftRadius: T.r_md, borderTopRightRadius: T.r_md,
+          position: "sticky", top: 0, zIndex: 2,
         }}
         onMouseEnter={e => e.currentTarget.style.background = "rgba(30,30,45,0.6)"}
         onMouseLeave={e => e.currentTarget.style.background = "rgba(20,20,30,0.5)"}
@@ -1564,9 +1603,10 @@ function LayerPanel({
           }}
           onMouseEnter={e => { e.currentTarget.style.color = T.text; }}
           onMouseLeave={e => { e.currentTarget.style.color = T.textMuted; }}
-        >⟲</span>
+        >⟲ position</span>
       </div>
 
+      {/* ── SHOW ─────────────────────────────────────────────── */}
       <div style={{
         padding: "8px 10px 4px", fontSize: 9, letterSpacing: ".14em",
         color: T.textMuted, textTransform: "uppercase",
@@ -1584,6 +1624,42 @@ function LayerPanel({
           onChange={v => setLayers(l => ({ ...l, attributes: v }))} />
       )}
 
+      {/* ── LABELS ───────────────────────────────────────────── */}
+      <SectionLabel>labels</SectionLabel>
+      <Toggle on={labelOpts.bigLabels} label={`${layout.bigLabel} names`} color="#A78BFA"
+        onChange={v => setLabelOpts(o => ({ ...o, bigLabels: v }))} />
+
+      {/* ── SIZE ─────────────────────────────────────────────── */}
+      <SectionLabel action={
+        <span
+          onClick={() => setNodeSizes({ big: 1, mid: 1, small: 1, attr: 1 })}
+          style={{ fontSize: 9, color: T.textMuted, cursor: "pointer",
+                   fontFamily: T.fontMono, letterSpacing: ".1em" }}
+          onMouseEnter={e => e.currentTarget.style.color = T.text}
+          onMouseLeave={e => e.currentTarget.style.color = T.textMuted}
+        >reset</span>
+      }>size</SectionLabel>
+      <Slider label={`${layout.bigLabel} size`} value={nodeSizes.big}
+        min={0.3} max={3} step={0.1} formatValue={multFmt}
+        onChange={v => setNodeSizes(s => ({ ...s, big: v }))} />
+      <Slider label={`${layout.midLabel} size`} value={nodeSizes.mid}
+        min={0.3} max={3} step={0.1} formatValue={multFmt}
+        disabled={!layers.mids}
+        onChange={v => setNodeSizes(s => ({ ...s, mid: v }))} />
+      {layout.hasSmalls && (
+        <Slider label={`${layout.smallLabel} size`} value={nodeSizes.small}
+          min={0.3} max={3} step={0.1} formatValue={multFmt}
+          disabled={!layers.smalls}
+          onChange={v => setNodeSizes(s => ({ ...s, small: v }))} />
+      )}
+      {layout.hasAttrs && (
+        <Slider label="Attribute size" value={nodeSizes.attr}
+          min={0.3} max={3} step={0.1} formatValue={multFmt}
+          disabled={!layers.attributes}
+          onChange={v => setNodeSizes(s => ({ ...s, attr: v }))} />
+      )}
+
+      {/* ── SEARCH ──────────────────────────────────────────── */}
       <SectionLabel>search</SectionLabel>
       <SearchBox
         value={search}
@@ -1592,6 +1668,7 @@ function LayerPanel({
         onResultClick={onSearchResultClick}
       />
 
+      {/* ── ISOLATE ─────────────────────────────────────────── */}
       <SectionLabel action={
         (filters.bigName || filters.midName) ? (
           <span
@@ -1620,6 +1697,7 @@ function LayerPanel({
         />
       )}
 
+      {/* ── ATTRIBUTES ──────────────────────────────────────── */}
       {layout.hasAttrs && (
         <>
           <SectionLabel>attributes</SectionLabel>
@@ -1627,16 +1705,74 @@ function LayerPanel({
         </>
       )}
 
+      {/* ── CONNECTIONS ─────────────────────────────────────── */}
       <SectionLabel>connections</SectionLabel>
       <SegmentedControl value={linesMode} onChange={setLinesMode} options={[
         { value: "off",  label: "off" },
         { value: "auto", label: "auto" },
         { value: "on",   label: "on" },
       ]} />
+      <Slider label="Focus edges" value={lineOpacity}
+        min={0} max={1} step={0.05} formatValue={pctFmt}
+        disabled={linesMode === "off"}
+        onChange={setLineOpacity} />
+      <Slider label="All edges (ON mode)" value={allLinesOpacity}
+        min={0} max={1} step={0.02} formatValue={pctFmt}
+        disabled={linesMode !== "on"}
+        onChange={setAllLinesOpacity} />
 
+      {/* ── MOTION ──────────────────────────────────────────── */}
       <SectionLabel>motion</SectionLabel>
       <Toggle on={autoRotate} label="Auto-rotate" color="#FACC15"
         onChange={setAutoRotate} />
+      <Slider label="Speed" value={rotateSpeed}
+        min={0.1} max={3} step={0.1} formatValue={multFmt}
+        disabled={!autoRotate}
+        onChange={setRotateSpeed} />
+
+      {/* ── BACKGROUND ──────────────────────────────────────── */}
+      <SectionLabel>background</SectionLabel>
+      <Toggle on={bgStars.on} label="Star field" color="#E5E7EB"
+        onChange={v => setBgStars(b => ({ ...b, on: v }))} />
+      <Slider label="Density" value={bgStars.count}
+        min={0} max={5000} step={100} formatValue={v => Math.round(v)}
+        disabled={!bgStars.on}
+        onChange={v => setBgStars(b => ({ ...b, count: v }))} />
+      <Slider label="Drift speed" value={bgStars.speed}
+        min={0} max={1} step={0.05} formatValue={multFmt}
+        disabled={!bgStars.on}
+        onChange={v => setBgStars(b => ({ ...b, speed: v }))} />
+
+      {/* ── LIGHTING ────────────────────────────────────────── */}
+      <SectionLabel>lighting</SectionLabel>
+      <Slider label="Glow intensity" value={glowIntensity}
+        min={0} max={2} step={0.1} formatValue={multFmt}
+        onChange={setGlowIntensity} />
+
+      {/* ── RESET ───────────────────────────────────────────── */}
+      <div style={{
+        marginTop: 10, padding: "8px 10px", borderTop: `1px solid ${T.borderHi}`,
+      }}>
+        <div
+          onClick={onResetCustomization}
+          style={{
+            textAlign: "center", padding: "6px 8px",
+            border: `1px solid ${T.borderHi}`, borderRadius: 4,
+            fontSize: 10, fontFamily: T.fontMono,
+            color: T.textMuted, letterSpacing: ".08em",
+            cursor: "pointer", userSelect: "none",
+            textTransform: "uppercase",
+          }}
+          onMouseEnter={e => {
+            e.currentTarget.style.color = T.text;
+            e.currentTarget.style.borderColor = T.accent;
+          }}
+          onMouseLeave={e => {
+            e.currentTarget.style.color = T.textMuted;
+            e.currentTarget.style.borderColor = T.borderHi;
+          }}
+        >↺ reset all customization</div>
+      </div>
     </div>
   );
 }
@@ -1765,13 +1901,19 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
 
   // Filtering panel — lets the user isolate a specific big/mid and restrict
   // attrs to specific categories. `null` means "no filter" for that slot.
-  //   bigName:   show only this big + its descendants
-  //   midName:   show only this mid + its children
-  //   attrCats:  null = all categories; Set of ids = only those
   const [filters, setFilters] = useState({ bigName: null, midName: null, attrCats: null });
-  // Live text search. When non-empty, a dropdown of top matches is shown;
-  // clicking a match focuses the corresponding node.
   const [search, setSearch] = useState("");
+
+  // ── Fine-grain customization ─────────────────────────────────────
+  // All visual parameters are state-driven so the user can tune the map
+  // to their preference. Defaults match the pre-customization look.
+  const [nodeSizes, setNodeSizes] = useState({ big: 1.0, mid: 1.0, small: 1.0, attr: 1.0 });
+  const [labelOpts, setLabelOpts] = useState({ bigLabels: true });
+  const [lineOpacity, setLineOpacity] = useState(1.0);   // 0 = invisible, 1 = full
+  const [allLinesOpacity, setAllLinesOpacity] = useState(0.22); // base for "on" mode
+  const [rotateSpeed, setRotateSpeed] = useState(0.6);
+  const [bgStars, setBgStars] = useState({ on: true, count: 2000, speed: 0.2 });
+  const [glowIntensity, setGlowIntensity] = useState(1.0); // ambient + point light mult
 
   const controlsRef = useRef();
   const interactionTimer = useRef(null);
@@ -1842,11 +1984,10 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
   const searchResults = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (q.length < 1) return [];
-    // Prefer prefix matches first, then substring matches.
     const prefix = [], sub = [];
     for (const item of searchIndex) {
       const n = item.name.toLowerCase();
-      if (n === q) prefix.unshift(item);          // exact match goes to top
+      if (n === q) prefix.unshift(item);
       else if (n.startsWith(q)) prefix.push(item);
       else if (n.includes(q)) sub.push(item);
     }
@@ -1855,8 +1996,6 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
 
   const lines = useMemo(() => focusLines(focused, layout), [focused, layout]);
 
-  // All tree edges — used when linesMode === "on". Computed from positions
-  // so it works for every category shape (genres, instruments, moods, flat).
   const allEdges = useMemo(() => {
     const out = [];
     for (const m of visibleMids) {
@@ -1890,6 +2029,16 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
     setResetCount(c => c + 1);
   };
 
+  const handleResetCustomization = () => {
+    setNodeSizes({ big: 1.0, mid: 1.0, small: 1.0, attr: 1.0 });
+    setLabelOpts({ bigLabels: true });
+    setLineOpacity(1.0);
+    setAllLinesOpacity(0.22);
+    setRotateSpeed(0.6);
+    setBgStars({ on: true, count: 2000, speed: 0.2 });
+    setGlowIntensity(1.0);
+  };
+
   const handleSearchResultClick = (item) => {
     setSearch("");
     if (item.kind === "big") selectBig(item.node);
@@ -1898,9 +2047,6 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
     else selectAttr(item.node);
   };
 
-  // Pause auto-rotate for ~2.5s after each interaction. This prevents the
-  // "wait… where did it go?" feeling when you drag and the camera keeps
-  // spinning afterwards.
   const onControlsStart = () => {
     setInteracting(true);
     if (interactionTimer.current) clearTimeout(interactionTimer.current);
@@ -1914,35 +2060,41 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
     <div style={{ position: "relative", width: "100%", height: "calc(100vh - 80px)", minHeight: 500, background: "radial-gradient(ellipse at center, #0A0A14 0%, #04040B 70%)", overflow: "hidden" }}>
       <Canvas camera={{ position: [0, 15, 130], fov: 50, near: 0.1, far: 800 }} dpr={[1, 2]} onPointerMissed={() => setFocused(null)}>
         <color attach="background" args={["#04040B"]} />
-        <ambientLight intensity={0.36} />
-        <pointLight position={[0, 0, 0]} intensity={0.7} distance={260} color="#9aa8ff" />
-        <pointLight position={[80, 40, 40]} intensity={0.35} distance={200} color="#ffd6a8" />
+        <ambientLight intensity={0.36 * glowIntensity} />
+        <pointLight position={[0, 0, 0]} intensity={0.7 * glowIntensity} distance={260} color="#9aa8ff" />
+        <pointLight position={[80, 40, 40]} intensity={0.35 * glowIntensity} distance={200} color="#ffd6a8" />
 
         <Suspense fallback={null}>
-          <Stars radius={300} depth={90} count={2000} factor={4} saturation={0} fade speed={0.2} />
+          {bgStars.on && bgStars.count > 0 && (
+            <Stars radius={300} depth={90} count={bgStars.count} factor={4} saturation={0} fade speed={bgStars.speed} />
+          )}
 
-          <BigNodes bigs={visibleBigs} focused={focused} layout={layout} onSelect={selectBig} onHover={setHovered} />
+          <BigNodes bigs={visibleBigs} focused={focused} layout={layout} onSelect={selectBig} onHover={setHovered}
+                    sizeMult={nodeSizes.big} showLabel={labelOpts.bigLabels} />
 
           {layers.mids && (
-            <MidNodes mids={visibleMids} focused={focused} layout={layout} onSelect={selectMid} onHover={setHovered} />
+            <MidNodes mids={visibleMids} focused={focused} layout={layout} onSelect={selectMid} onHover={setHovered}
+                      sizeMult={nodeSizes.mid} />
           )}
 
           {layout.hasSmalls && layers.mids && layers.smalls && (
-            <SmallNodes smalls={visibleSmalls} focused={focused} onSelect={selectSmall} onHover={setHovered} />
+            <SmallNodes smalls={visibleSmalls} focused={focused} onSelect={selectSmall} onHover={setHovered}
+                        sizeMult={nodeSizes.small} />
           )}
 
           {layout.hasAttrs && layers.attributes && (
-            <AttributeNodes attributes={visibleAttributes} focused={focused} layout={layout} onSelect={selectAttr} onHover={setHovered} />
+            <AttributeNodes attributes={visibleAttributes} focused={focused} layout={layout} onSelect={selectAttr} onHover={setHovered}
+                            sizeMult={nodeSizes.attr} />
           )}
 
-          {linesMode === "on" && <AllTreeLines edges={allEdges} opacity={0.22} />}
-          {linesMode !== "off" && <FocusEdges lines={lines} visible={!!focused} />}
+          {linesMode === "on" && <AllTreeLines edges={allEdges} opacity={allLinesOpacity} />}
+          {linesMode !== "off" && <FocusEdges lines={lines} visible={!!focused} opacityMult={lineOpacity} />}
 
           <HoverTooltip hovered={hovered} />
         </Suspense>
 
         <OrbitControls ref={controlsRef} enableDamping dampingFactor={0.07} minDistance={2} maxDistance={260} rotateSpeed={0.55} zoomSpeed={0.9} panSpeed={0.6}
-          autoRotate={autoRotate && !interacting} autoRotateSpeed={0.6}
+          autoRotate={autoRotate && !interacting} autoRotateSpeed={rotateSpeed}
           onStart={onControlsStart} onEnd={onControlsEnd} />
         <CameraRig focusTarget={focused} resetCount={resetCount} controlsRef={controlsRef} />
       </Canvas>
@@ -1955,6 +2107,14 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
         search={search} setSearch={setSearch}
         searchResults={searchResults}
         onSearchResultClick={handleSearchResultClick}
+        nodeSizes={nodeSizes} setNodeSizes={setNodeSizes}
+        labelOpts={labelOpts} setLabelOpts={setLabelOpts}
+        lineOpacity={lineOpacity} setLineOpacity={setLineOpacity}
+        allLinesOpacity={allLinesOpacity} setAllLinesOpacity={setAllLinesOpacity}
+        rotateSpeed={rotateSpeed} setRotateSpeed={setRotateSpeed}
+        bgStars={bgStars} setBgStars={setBgStars}
+        glowIntensity={glowIntensity} setGlowIntensity={setGlowIntensity}
+        onResetCustomization={handleResetCustomization}
       />
       <StatsBadge layout={layout} focused={focused} />
       <ResetViewButton onReset={handleReset} hasFocus={!!focused || !!filters.bigName || !!filters.midName || !!filters.attrCats} />
