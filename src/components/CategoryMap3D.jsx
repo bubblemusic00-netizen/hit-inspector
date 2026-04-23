@@ -3607,111 +3607,107 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
         });
       }
     }
-    // Mid → attribute edges. Without these, attribute nodes (moods,
-    // grooves, instruments like "Amapiano log drum") had no visible
-    // connections in ON mode, even though the data is there and focus
-    // mode rendered them correctly. Cap at 3 attrs per mid so the edge
-    // count stays manageable — a typical genre view goes from ~1300
-    // edges to ~2000, still one draw call thanks to LineSegments2
-    // batching. Only draw when the attribute tier is also visible.
-    if (layout.hasAttrs && layers.attributes && layout.midToAttrs && visibleAttributes?.length) {
-      const visibleAttrKeys = new Set(visibleAttributes.map(a => `${a.categoryId}:${a.name}`));
-      for (const m of visibleMids) {
-        const attrs = layout.midToAttrs(m) || [];
-        let added = 0;
-        for (const { node, cat } of attrs) {
-          if (added >= 3) break;
-          if (!node?.pos) continue;
-          if (!visibleAttrKeys.has(`${node.categoryId}:${node.name}`)) continue;
-          const attrColor = (cat?.color) || node.color;
-          out.push({
-            from: m.pos, to: node.pos,
-            color: blendHex(m.color, attrColor),
-            fromNode: { ...m, kind: "mid" }, toNode: { ...node, kind: "attribute" },
-          });
-          added++;
-        }
-      }
-      // Big → attribute edges. Some attrs associate at the genre level
-      // (from the aggregated `bigAttrEdges` table) and don't naturally
-      // fall under any particular mid's top-3 attrs — they would end up
-      // edge-less in ON mode, which is exactly the "floating attribute
-      // with no lines" the user reported. Same cap logic as mids.
-      if (layout.bigAttrEdges) {
-        const alreadyEmitted = new Set(
-          out
-            .filter(e => e.toNode?.kind === "attribute")
-            .map(e => `${e.fromNode.kind}/${e.fromNode.name}::${e.toNode.categoryId}:${e.toNode.name}`)
-        );
-        for (const b of visibleBigs) {
-          const attrs = layout.bigAttrEdges(b) || [];
-          let added = 0;
-          for (const { node, cat } of attrs) {
-            if (added >= 3) break;
-            if (!node?.pos) continue;
-            if (!visibleAttrKeys.has(`${node.categoryId}:${node.name}`)) continue;
-            const k = `big/${b.name}::${node.categoryId}:${node.name}`;
-            if (alreadyEmitted.has(k)) continue;
-            alreadyEmitted.add(k);
-            const attrColor = (cat?.color) || node.color;
-            out.push({
-              from: b.pos, to: node.pos,
-              color: blendHex(b.color, attrColor),
-              fromNode: { ...b, kind: "big" }, toNode: { ...node, kind: "attribute" },
-            });
-            added++;
-          }
-        }
-      }
-      // Fallback: any visible attribute that STILL has no edge (rank 4+
-      // under every mid it appears in, and outside every big's top-6)
-      // gets one edge via inverse lookup. Without this, those attrs
-      // hang in space at the map periphery as disconnected stars —
-      // exactly the "floating attributes" the user called out in the
-      // last screenshot. Prefers a mid over a big for the connection
-      // since mid→attr is the more specific relationship.
-      const attrHasEdge = new Set();
-      for (const e of out) {
-        if (e.toNode?.kind === "attribute") {
-          attrHasEdge.add(`${e.toNode.categoryId}:${e.toNode.name}`);
-        }
-      }
+    // Attribute edges — driven from the ATTR side (per-attribute cap
+    // instead of per-mid). The previous approach iterated every mid's
+    // top-3 attrs, which meant an attr at rank 4+ under all its mids
+    // got edge-less. That produced the "floating attribute star"
+    // effect even though the attr had many real relationships (visible
+    // when you focused on it). Now each visible attr independently
+    // picks up to ATTR_EDGE_CAP_MID edges to the mids that reference
+    // it, guaranteeing every attr shows a realistic cluster of
+    // connections. A small per-big cap adds genre-level connections
+    // for attrs that associate aggregated at that level.
+    if (layout.hasAttrs && layers.attributes && visibleAttributes?.length) {
+      const visibleMidKey = new Set(visibleMids.map(m => `${m.parent}/${m.name}`));
+      const ATTR_EDGE_CAP_MID = 8;   // edges per attr to its referencing mids
+      const BIG_ATTR_CAP      = 3;   // additional edges per big's top attrs
+      const emittedEdgeKey = new Set();
+
       if (layout.attrToMids) {
-        const visibleMidKey = new Set(visibleMids.map(m => `${m.parent}/${m.name}`));
         for (const a of visibleAttributes) {
-          const k = `${a.categoryId}:${a.name}`;
-          if (attrHasEdge.has(k)) continue;
           if (!a.pos) continue;
-          const users = layout.attrToMids(a, 10) || [];
-          let linked = false;
+          // Fetch up to 3× the cap so we have filler when some users are
+          // hidden (due to bigs/mids filter state) — we only actually
+          // draw up to the cap from the VISIBLE ones.
+          const users = layout.attrToMids(a, ATTR_EDGE_CAP_MID * 3) || [];
+          let drawn = 0;
           for (const u of users) {
+            if (drawn >= ATTR_EDGE_CAP_MID) break;
             if (!u?.pos) continue;
-            const uk = `${u.parent}/${u.name}`;
-            if (!visibleMidKey.has(uk)) continue;
+            if (!visibleMidKey.has(`${u.parent}/${u.name}`)) continue;
+            const ek = `mid/${u.parent}/${u.name}::${a.categoryId}:${a.name}`;
+            if (emittedEdgeKey.has(ek)) continue;
+            emittedEdgeKey.add(ek);
             out.push({
               from: u.pos, to: a.pos,
               color: blendHex(u.color, a.color),
               fromNode: { ...u, kind: "mid" },
               toNode:   { ...a, kind: "attribute" },
             });
-            linked = true;
-            attrHasEdge.add(k);
-            break;
+            drawn++;
           }
-          if (!linked && layout.bigAttrEdges) {
-            for (const b of visibleBigs) {
-              const bAttrs = layout.bigAttrEdges(b) || [];
-              const hit = bAttrs.some(r => r.node?.categoryId === a.categoryId && r.node?.name === a.name);
-              if (hit) {
-                out.push({
-                  from: b.pos, to: a.pos,
-                  color: blendHex(b.color, a.color),
-                  fromNode: { ...b, kind: "big" },
-                  toNode:   { ...a, kind: "attribute" },
-                });
-                attrHasEdge.add(k);
-                break;
-              }
+        }
+      }
+
+      // Per-big contribution: attrs that bigAttrEdges ranks highly for
+      // each genre get an extra genre-level line. This gives "genre
+      // hub" attrs (e.g. a mood dominant across an entire family) a
+      // visible link to the big node even when they're already
+      // connected to several of that big's mids.
+      if (layout.bigAttrEdges) {
+        const visibleAttrKeys = new Set(visibleAttributes.map(a => `${a.categoryId}:${a.name}`));
+        const attrByKey = new Map(visibleAttributes.map(a => [`${a.categoryId}:${a.name}`, a]));
+        for (const b of visibleBigs) {
+          const bAttrs = layout.bigAttrEdges(b) || [];
+          let added = 0;
+          for (const { node, cat } of bAttrs) {
+            if (added >= BIG_ATTR_CAP) break;
+            if (!node?.pos) continue;
+            const k = `${node.categoryId}:${node.name}`;
+            if (!visibleAttrKeys.has(k)) continue;
+            const attrNode = attrByKey.get(k) || node;
+            const ek = `big/${b.name}::${k}`;
+            if (emittedEdgeKey.has(ek)) continue;
+            emittedEdgeKey.add(ek);
+            const attrColor = (cat?.color) || attrNode.color;
+            out.push({
+              from: b.pos, to: attrNode.pos,
+              color: blendHex(b.color, attrColor),
+              fromNode: { ...b, kind: "big" },
+              toNode:   { ...attrNode, kind: "attribute" },
+            });
+            added++;
+          }
+        }
+      }
+
+      // Final safety net: any visible attr that still has no edge
+      // (very rare — means no referencing mid is visible AND no big
+      // lists it) gets one big-fallback edge so it isn't left
+      // completely disconnected.
+      const attrHasEdge = new Set();
+      for (const e of out) {
+        if (e.toNode?.kind === "attribute") {
+          attrHasEdge.add(`${e.toNode.categoryId}:${e.toNode.name}`);
+        }
+      }
+      if (layout.bigAttrEdges) {
+        for (const a of visibleAttributes) {
+          const k = `${a.categoryId}:${a.name}`;
+          if (attrHasEdge.has(k)) continue;
+          if (!a.pos) continue;
+          for (const b of visibleBigs) {
+            const bAttrs = layout.bigAttrEdges(b) || [];
+            const hit = bAttrs.some(r => r.node?.categoryId === a.categoryId && r.node?.name === a.name);
+            if (hit) {
+              out.push({
+                from: b.pos, to: a.pos,
+                color: blendHex(b.color, a.color),
+                fromNode: { ...b, kind: "big" },
+                toNode:   { ...a, kind: "attribute" },
+              });
+              attrHasEdge.add(k);
+              break;
             }
           }
         }
