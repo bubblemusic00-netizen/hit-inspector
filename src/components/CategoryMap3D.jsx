@@ -1165,7 +1165,7 @@ function HoverTooltip({ hovered }) {
   );
 }
 
-function CameraRig({ focusTarget, controlsRef }) {
+function CameraRig({ focusTarget, resetCount, controlsRef }) {
   const { camera } = useThree();
   const animating = useRef(false);
   const destPos = useRef(new THREE.Vector3(0, 15, 130));
@@ -1182,6 +1182,14 @@ function CameraRig({ focusTarget, controlsRef }) {
     destPos.current.copy(t.clone().add(dir.multiplyScalar(dist)));
     animating.current = true;
   }, [focusTarget]);
+
+  // Reset: fly back to the default viewing position.
+  useEffect(() => {
+    if (!resetCount) return;
+    destPos.current.set(0, 15, 130);
+    destTgt.current.set(0, 0, 0);
+    animating.current = true;
+  }, [resetCount]);
 
   useFrame((_, dt) => {
     if (!animating.current) return;
@@ -1315,7 +1323,56 @@ function FocusHUD({ focused, onClear, layout }) {
   );
 }
 
-function StatsBadge({ layout }) {
+function ResetViewButton({ onReset, hasFocus }) {
+  // Only show when there's something worth resetting from.
+  // (No focus AND no camera drift means the button is noise.)
+  return (
+    <div
+      onClick={onReset}
+      title="Reset view (Esc)"
+      style={{
+        position: "absolute", bottom: 16, left: "50%", transform: "translateX(-50%)",
+        background: "rgba(10,10,15,0.92)", border: `1px solid ${T.borderHi}`,
+        borderRadius: T.r_sm, padding: "6px 14px", cursor: "pointer",
+        color: T.textSec, fontSize: 10, fontFamily: T.fontMono,
+        letterSpacing: ".14em", textTransform: "uppercase", userSelect: "none",
+        zIndex: 10, transition: "color 120ms, border-color 120ms",
+      }}
+      onMouseEnter={e => { e.currentTarget.style.color = T.text; e.currentTarget.style.borderColor = T.text; }}
+      onMouseLeave={e => { e.currentTarget.style.color = T.textSec; e.currentTarget.style.borderColor = T.borderHi; }}
+    >
+      ⟲ reset view
+    </div>
+  );
+}
+
+function StatsBadge({ layout, focused }) {
+  // When focused on a big node, show child counts for that node only.
+  // When focused on a mid, show micro count and attr count for that sub.
+  // When focused on an attr, show how many subs use it.
+  // Otherwise, show global totals.
+  let primary, secondary;
+
+  if (focused?.kind === "big") {
+    const subs = layout.mids.filter(m => m.parent === focused.name);
+    const micros = layout.smalls.filter(s => s.grandparent === focused.name);
+    const attrs = layout.bigAttrEdges ? layout.bigAttrEdges({ name: focused.name }) : [];
+    primary = `${subs.length} ${layout.midLabel.toLowerCase()}${layout.hasSmalls ? ` · ${micros.length} ${layout.smallLabel.toLowerCase()}` : ""}`;
+    secondary = attrs.length ? `${attrs.length} top attributes` : null;
+  } else if (focused?.kind === "mid") {
+    const micros = layout.smalls.filter(s => s.parent === focused.name && (!focused.parent || s.grandparent === focused.parent));
+    const attrs = layout.midToAttrs ? layout.midToAttrs({ name: focused.name, parent: focused.parent }) : [];
+    primary = layout.hasSmalls ? `${micros.length} ${layout.smallLabel.toLowerCase()}` : null;
+    secondary = attrs.length ? `${attrs.length} attribute pairings` : null;
+  } else if (focused?.kind === "attribute") {
+    const users = layout.attrToMids ? layout.attrToMids({ name: focused.name, categoryId: focused.categoryId }, 999) : [];
+    primary = `used by ${users.length} ${layout.midLabel.toLowerCase()}`;
+    secondary = null;
+  } else {
+    primary = `${layout.bigs.length} ${layout.bigLabel.toLowerCase()} · ${layout.mids.length} ${layout.midLabel.toLowerCase()}${layout.hasSmalls ? ` · ${layout.smalls.length} ${layout.smallLabel.toLowerCase()}` : ""}`;
+    secondary = layout.hasAttrs ? `${layout.attributes.length} attributes` : null;
+  }
+
   return (
     <div style={{
       position: "absolute", top: 16, right: 16, fontSize: 10,
@@ -1324,8 +1381,8 @@ function StatsBadge({ layout }) {
       borderRadius: T.r_sm, userSelect: "none", lineHeight: 1.8,
       letterSpacing: ".04em", zIndex: 10,
     }}>
-      <div>{layout.bigs.length} {layout.bigLabel.toLowerCase()} · {layout.mids.length} {layout.midLabel.toLowerCase()}{layout.hasSmalls ? ` · ${layout.smalls.length} ${layout.smallLabel.toLowerCase()}` : ""}</div>
-      {layout.hasAttrs && <div>{layout.attributes.length} attributes</div>}
+      {primary && <div>{primary}</div>}
+      {secondary && <div>{secondary}</div>}
     </div>
   );
 }
@@ -1344,7 +1401,10 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
   const [hovered, setHovered] = useState(null);
   const [linesMode, setLinesMode] = useState("auto");   // "off" | "auto" | "on"
   const [autoRotate, setAutoRotate] = useState(false);
+  const [interacting, setInteracting] = useState(false);
+  const [resetCount, setResetCount] = useState(0);
   const controlsRef = useRef();
+  const interactionTimer = useRef(null);
 
   // Reset when switching categories
   useEffect(() => {
@@ -1359,6 +1419,18 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
     setAutoRotate(false);
   }, [categoryId, layout.hasSmalls, layout.hasAttrs]);
 
+  // Escape key: clear focus (or reset if nothing focused)
+  useEffect(() => {
+    const handler = (e) => {
+      if (e.key === "Escape") {
+        if (focused) setFocused(null);
+        else setResetCount(c => c + 1);
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [focused]);
+
   const lines = useMemo(() => focusLines(focused, layout), [focused, layout]);
 
   // All tree edges — used when linesMode === "on". Computed from positions
@@ -1370,7 +1442,6 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
       if (parent?.pos && m.pos) out.push({ from: parent.pos, to: m.pos, color: m.color || parent.color });
     }
     if (layout.hasSmalls && layers.smalls && layers.mids) {
-      // Look up the mid by (name, parent) tuple. Handle both keying styles.
       const midLookup = (sName, gName) =>
         layout.midsByKey?.[sName + "/" + gName] ||
         layout.midsByKey?.[sName] ||
@@ -1387,6 +1458,23 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
   const selectMid   = s => setFocused({ kind: "mid",       name: s.name, parent: s.parent, pos: s.pos });
   const selectSmall = m => setFocused({ kind: "small",     name: m.name, parent: m.parent, grandparent: m.grandparent, pos: m.pos });
   const selectAttr  = a => setFocused({ kind: "attribute", name: a.name, label: a.label, categoryId: a.categoryId, pos: a.pos });
+
+  const handleReset = () => {
+    setFocused(null);
+    setResetCount(c => c + 1);
+  };
+
+  // Pause auto-rotate for ~2.5s after each interaction. This prevents the
+  // "wait… where did it go?" feeling when you drag and the camera keeps
+  // spinning afterwards.
+  const onControlsStart = () => {
+    setInteracting(true);
+    if (interactionTimer.current) clearTimeout(interactionTimer.current);
+  };
+  const onControlsEnd = () => {
+    if (interactionTimer.current) clearTimeout(interactionTimer.current);
+    interactionTimer.current = setTimeout(() => setInteracting(false), 2500);
+  };
 
   return (
     <div style={{ position: "relative", width: "100%", height: "calc(100vh - 80px)", minHeight: 500, background: "#04040B", overflow: "hidden" }}>
@@ -1418,14 +1506,17 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
           <HoverTooltip hovered={hovered} />
         </Suspense>
 
-        <OrbitControls ref={controlsRef} enableDamping dampingFactor={0.07} minDistance={2} maxDistance={260} rotateSpeed={0.55} zoomSpeed={0.9} panSpeed={0.6} autoRotate={autoRotate} autoRotateSpeed={0.6} />
-        <CameraRig focusTarget={focused} controlsRef={controlsRef} />
+        <OrbitControls ref={controlsRef} enableDamping dampingFactor={0.07} minDistance={2} maxDistance={260} rotateSpeed={0.55} zoomSpeed={0.9} panSpeed={0.6}
+          autoRotate={autoRotate && !interacting} autoRotateSpeed={0.6}
+          onStart={onControlsStart} onEnd={onControlsEnd} />
+        <CameraRig focusTarget={focused} resetCount={resetCount} controlsRef={controlsRef} />
       </Canvas>
 
       <LayerPanel layers={layers} setLayers={setLayers} layout={layout}
                   linesMode={linesMode} setLinesMode={setLinesMode}
                   autoRotate={autoRotate} setAutoRotate={setAutoRotate} />
-      <StatsBadge layout={layout} />
+      <StatsBadge layout={layout} focused={focused} />
+      <ResetViewButton onReset={handleReset} hasFocus={!!focused} />
       <FocusHUD focused={focused} onClear={() => setFocused(null)} layout={layout} />
     </div>
   );

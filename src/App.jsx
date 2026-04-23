@@ -82,7 +82,7 @@ export default function App() {
       mainContent = (
         <CategoryPage
           category={cat}
-          raw={raw}
+          raw={raw.data}
           derived={derived}
           tab={tab}
           onTab={setTab}
