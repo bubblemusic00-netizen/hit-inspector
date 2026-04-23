@@ -3635,48 +3635,39 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
   }, [layout.attributes, filters.attrCats, filters.attrs, focusOverride]);
 
   // ── Rendered lists (what actually gets drawn) ─────────────────────
-  // Layer toggles hide a tier entirely, with one exception: the
-  // currently-focused node (plus its direct ancestor chain so focus
-  // context survives). Without this exception, focusing on a small and
-  // then switching off the microstyle layer left the camera orbiting
-  // an invisible point in space — the "I'm around an invisible star"
-  // bug. We also narrow child tiers when their layer is off so a
-  // focus on a big doesn't flood back in all its mids.
+  // Layer toggles normally hide a tier, with ONE universal exception:
+  // anything that the current focus "reaches" (through focusOverride)
+  // stays visible no matter what. This matches the user's stated rule:
+  //   "if a star has an active connection to the focus, or is the focus
+  //    itself, show it — regardless of layer toggles or filter state."
+  // When no focus is active and a tier's layer is off, that tier just
+  // renders nothing. When layer is on, we render everything visibleX
+  // already allows (filter + focus override mixed in).
   const renderedBigs = useMemo(() => {
     if (layers.bigs) return visibleBigs;
-    // Ancestor-only fallback when big layer is off but a descendant is focused
-    if (focused?.kind === "big")   return visibleBigs.filter(b => b.name === focused.name);
-    if (focused?.kind === "mid")   return visibleBigs.filter(b => b.name === focused.parent);
-    if (focused?.kind === "small") return visibleBigs.filter(b => b.name === focused.grandparent);
-    return [];
-  }, [layers.bigs, visibleBigs, focused]);
+    if (!focusOverride) return [];
+    return visibleBigs.filter(b => focusOverride.bigs.has(b.name));
+  }, [layers.bigs, visibleBigs, focusOverride]);
 
   const renderedMids = useMemo(() => {
     if (layers.mids) return visibleMids;
-    if (focused?.kind === "mid") return visibleMids.filter(m => m.name === focused.name && m.parent === focused.parent);
-    if (focused?.kind === "small") return visibleMids.filter(m => m.name === focused.parent && m.parent === focused.grandparent);
-    return [];
-  }, [layers.mids, visibleMids, focused]);
+    if (!focusOverride) return [];
+    return visibleMids.filter(m => focusOverride.mids.has(`${m.parent}/${m.name}`));
+  }, [layers.mids, visibleMids, focusOverride]);
 
   const renderedSmalls = useMemo(() => {
     if (!layout.hasSmalls) return [];
-    if (layers.smalls && layers.mids) return visibleSmalls;
-    if (focused?.kind === "small") {
-      return visibleSmalls.filter(s =>
-        s.name === focused.name && s.parent === focused.parent && s.grandparent === focused.grandparent
-      );
-    }
-    return [];
-  }, [layout.hasSmalls, layers.smalls, layers.mids, visibleSmalls, focused]);
+    if (layers.smalls) return visibleSmalls;
+    if (!focusOverride) return [];
+    return visibleSmalls.filter(s => focusOverride.smalls.has(smallKey(s)));
+  }, [layout.hasSmalls, layers.smalls, visibleSmalls, focusOverride]);
 
   const renderedAttributes = useMemo(() => {
     if (!layout.hasAttrs) return [];
     if (layers.attributes) return visibleAttributes;
-    if (focused?.kind === "attribute") {
-      return visibleAttributes.filter(a => a.categoryId === focused.categoryId && a.name === focused.name);
-    }
-    return [];
-  }, [layout.hasAttrs, layers.attributes, visibleAttributes, focused]);
+    if (!focusOverride) return [];
+    return visibleAttributes.filter(a => focusOverride.attrs.has(attrKey(a)));
+  }, [layout.hasAttrs, layers.attributes, visibleAttributes, focusOverride]);
 
   // ── Search index ──────────────────────────────────────────────────
   const searchIndex = useMemo(() => {
