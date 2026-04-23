@@ -1107,8 +1107,8 @@ function FocusEdges({ lines, visible }) {
   return (
     <>
       {lines.map((l, i) => (
-        <Line key={i} points={[l.from, l.to]} color={l.color} lineWidth={1.6}
-              transparent opacity={l.kind === "tree" ? 0.85 : l.kind === "attr" ? 0.65 : 0.5} />
+        <Line key={i} points={[l.from, l.to]} color={l.color} lineWidth={3}
+              transparent opacity={l.kind === "tree" ? 0.9 : l.kind === "attr" ? 0.72 : 0.55} />
       ))}
     </>
   );
@@ -1116,7 +1116,7 @@ function FocusEdges({ lines, visible }) {
 
 // Batched renderer — one geometry for all edges. Uses LineSegments so a
 // few thousand lines render at 60fps.
-function AllTreeLines({ edges, opacity = 0.22 }) {
+function AllTreeLines({ edges, opacity = 0.28 }) {
   const geom = useMemo(() => {
     if (!edges.length) return null;
     const positions = new Float32Array(edges.length * 6);
@@ -1143,6 +1143,107 @@ function AllTreeLines({ edges, opacity = 0.22 }) {
     <lineSegments geometry={geom}>
       <lineBasicMaterial vertexColors transparent opacity={opacity} depthWrite={false} />
     </lineSegments>
+  );
+}
+
+// Twinkling stars sprinkled along each edge. Positions are computed ONCE
+// (interpolation along the edge) and stored on the InstancedMesh matrices.
+// Per-frame work is just `scale = sin(t)` per instance — for 1200 stars
+// this is ~microseconds per frame (~3% of a 16ms budget at worst).
+//
+// The stars inherit the edge's color, so Trap's tree edges have purple
+// stars, Rock's red, etc. — reinforcing the visual hierarchy.
+function EdgeStars({ edges, visible, count = 3, minEdgeLen = 2.2 }) {
+  const { positions, colors, phases, freqs, n } = useMemo(() => {
+    if (!edges.length) return { positions: null, colors: null, phases: null, freqs: null, n: 0 };
+    // Pre-compute per-edge star count based on length — long edges get a
+    // couple extra stars, short ones just one.
+    const records = [];
+    for (const e of edges) {
+      const dx = e.to[0] - e.from[0];
+      const dy = e.to[1] - e.from[1];
+      const dz = e.to[2] - e.from[2];
+      const len = Math.sqrt(dx*dx + dy*dy + dz*dz);
+      if (len < minEdgeLen) continue;
+      // Longer edges get proportionally more stars, capped at count+2.
+      const k = Math.min(count + 2, Math.max(1, Math.round(len / 3)));
+      for (let i = 1; i <= k; i++) {
+        const t = i / (k + 1);
+        records.push({
+          x: e.from[0] + dx * t,
+          y: e.from[1] + dy * t,
+          z: e.from[2] + dz * t,
+          color: e.color || "#ffffff",
+        });
+      }
+    }
+    const n = records.length;
+    const positions = new Float32Array(n * 3);
+    const colors = new Float32Array(n * 3);
+    const phases = new Float32Array(n);
+    const freqs = new Float32Array(n);
+    const c = new THREE.Color();
+    for (let i = 0; i < n; i++) {
+      const r = records[i];
+      positions[i*3+0] = r.x;
+      positions[i*3+1] = r.y;
+      positions[i*3+2] = r.z;
+      c.set(r.color);
+      colors[i*3+0] = c.r;
+      colors[i*3+1] = c.g;
+      colors[i*3+2] = c.b;
+      // Deterministic phase based on position so the pattern is stable
+      // across renders and doesn't shimmer when layout rebuilds.
+      phases[i] = (r.x * 0.31 + r.y * 0.17 + r.z * 0.43) % (Math.PI * 2);
+      freqs[i]  = 0.9 + ((i * 37) % 7) * 0.18;   // 0.9 — 2.0
+    }
+    return { positions, colors, phases, freqs, n };
+  }, [edges, count, minEdgeLen]);
+
+  const meshRef = useRef();
+  const dummy = useMemo(() => new THREE.Object3D(), []);
+  const tmpColor = useMemo(() => new THREE.Color(), []);
+
+  // Set static matrices + per-instance colors ONCE when positions change.
+  useEffect(() => {
+    const mesh = meshRef.current;
+    if (!mesh || !n) return;
+    for (let i = 0; i < n; i++) {
+      dummy.position.set(positions[i*3+0], positions[i*3+1], positions[i*3+2]);
+      dummy.scale.setScalar(1);
+      dummy.updateMatrix();
+      mesh.setMatrixAt(i, dummy.matrix);
+      tmpColor.setRGB(colors[i*3+0], colors[i*3+1], colors[i*3+2]);
+      mesh.setColorAt(i, tmpColor);
+    }
+    mesh.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    mesh.count = n;
+  }, [n, positions, colors, dummy, tmpColor]);
+
+  // Per-frame twinkle — only scale changes; positions stay static.
+  useFrame(({ clock }) => {
+    const mesh = meshRef.current;
+    if (!visible || !mesh || !n) return;
+    const t = clock.elapsedTime;
+    for (let i = 0; i < n; i++) {
+      const tw = 0.5 + 0.5 * Math.sin(t * freqs[i] + phases[i]);
+      // Scale oscillates between 0.25 and 1.15 — feels like blinking.
+      const scale = 0.25 + tw * 0.9;
+      dummy.position.set(positions[i*3+0], positions[i*3+1], positions[i*3+2]);
+      dummy.scale.setScalar(scale);
+      dummy.updateMatrix();
+      mesh.setMatrixAt(i, dummy.matrix);
+    }
+    mesh.instanceMatrix.needsUpdate = true;
+  });
+
+  if (!visible || !n) return null;
+  return (
+    <instancedMesh ref={meshRef} args={[undefined, undefined, n]}>
+      <sphereGeometry args={[0.1, 8, 8]} />
+      <meshBasicMaterial transparent opacity={0.95} toneMapped={false} depthWrite={false} />
+    </instancedMesh>
   );
 }
 
@@ -1836,8 +1937,10 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
             <AttributeNodes attributes={visibleAttributes} focused={focused} layout={layout} onSelect={selectAttr} onHover={setHovered} />
           )}
 
-          {linesMode === "on" && <AllTreeLines edges={allEdges} opacity={0.22} />}
+          {linesMode === "on" && <AllTreeLines edges={allEdges} opacity={0.28} />}
+          {linesMode === "on" && <EdgeStars edges={allEdges} visible={true} count={3} />}
           {linesMode !== "off" && <FocusEdges lines={lines} visible={!!focused} />}
+          {linesMode !== "off" && <EdgeStars edges={lines} visible={!!focused} count={4} minEdgeLen={1.5} />}
 
           <HoverTooltip hovered={hovered} />
         </Suspense>
