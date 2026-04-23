@@ -3285,28 +3285,31 @@ function FlightKeysHUD({ pressedKeys }) {
     const on = active.has(k);
     return (
       <div style={{
-        width: 22, height: 22, borderRadius: 4,
+        width: 28, height: 28, borderRadius: 5,
         display: "flex", alignItems: "center", justifyContent: "center",
-        fontSize: 10, fontFamily: T.fontMono, fontWeight: 600,
+        fontSize: 12, fontFamily: T.fontMono, fontWeight: 700,
         color: on ? "#fff" : T.textMuted,
-        background: on ? T.accent : "rgba(255,255,255,0.04)",
-        border: `1px solid ${on ? T.accent : "rgba(255,255,255,0.10)"}`,
-        transition: "background 80ms, color 80ms, border-color 80ms",
+        background: on ? T.accent : "rgba(255,255,255,0.05)",
+        border: `1px solid ${on ? T.accent : "rgba(255,255,255,0.14)"}`,
+        boxShadow: on ? "0 0 12px rgba(94,106,210,0.55)" : "none",
+        transition: "background 80ms, color 80ms, border-color 80ms, box-shadow 80ms",
       }}>{label || k.toUpperCase()}</div>
     );
   };
   return (
     <div style={{
-      position: "absolute", bottom: 52, left: 16, zIndex: 10,
-      display: "flex", alignItems: "center", gap: 10,
-      background: "rgba(10,10,15,0.65)", padding: "6px 8px",
-      borderRadius: T.r_sm, userSelect: "none", pointerEvents: "none",
+      position: "absolute", bottom: 60, left: "50%", transform: "translateX(-50%)",
+      zIndex: 15, display: "flex", alignItems: "center", gap: 10,
+      background: "rgba(10,10,15,0.80)",
+      border: `1px solid ${T.borderHi}`,
+      padding: "8px 12px",
+      borderRadius: T.r_md, userSelect: "none", pointerEvents: "none",
     }}>
-      <div style={{ display: "flex", gap: 3 }}>
+      <div style={{ display: "flex", gap: 4 }}>
         <Key k="w" /><Key k="a" /><Key k="s" /><Key k="d" />
       </div>
-      <div style={{ width: 1, height: 18, background: "rgba(255,255,255,0.08)" }} />
-      <div style={{ display: "flex", gap: 3 }}>
+      <div style={{ width: 1, height: 22, background: "rgba(255,255,255,0.12)" }} />
+      <div style={{ display: "flex", gap: 4 }}>
         <Key k="z" /><Key k="x" />
       </div>
     </div>
@@ -3580,59 +3583,70 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
   // know the ref changed (React doesn't observe refs). Keeping them
   // paired lets the ref stay the per-frame read source and the state
   // drive the visual feedback.
+  //
+  // We attach TWO sets of listeners: global (window + document, capture
+  // phase) AND direct on the map's root div via React's onKeyDown.
+  // The root div has tabIndex=0 and auto-focuses on mount. Whichever
+  // path delivers the event first wins — this is defensive redundancy
+  // after reports that keys weren't firing at all, which suggests
+  // something upstream might be eating window events.
   const keyboardMoveRef = useRef(new Set());
   const [pressedKeys, setPressedKeys] = useState("");
+  const rootDivRef = useRef(null);
+  const CODE_TO_KEY = useMemo(() => ({
+    KeyW: "w", KeyA: "a", KeyS: "s", KeyD: "d", KeyX: "x", KeyZ: "z",
+  }), []);
+  const isTextTarget = (t) => {
+    if (!t) return false;
+    const tag = (t.tagName || "").toLowerCase();
+    return tag === "input" || tag === "textarea" || t.isContentEditable;
+  };
+  const syncPressedKeys = () => {
+    setPressedKeys([...keyboardMoveRef.current].sort().join(""));
+  };
+  const flightKeyDown = (e) => {
+    if (isTextTarget(e.target)) return;
+    const mapped = CODE_TO_KEY[e.code];
+    if (!mapped) return;
+    const before = keyboardMoveRef.current.size;
+    keyboardMoveRef.current.add(mapped);
+    if (keyboardMoveRef.current.size !== before) syncPressedKeys();
+    e.preventDefault();
+  };
+  const flightKeyUp = (e) => {
+    const mapped = CODE_TO_KEY[e.code];
+    if (mapped && keyboardMoveRef.current.has(mapped)) {
+      keyboardMoveRef.current.delete(mapped);
+      syncPressedKeys();
+    }
+  };
   useEffect(() => {
-    const CODE_TO_KEY = {
-      KeyW: "w", KeyA: "a", KeyS: "s", KeyD: "d", KeyX: "x", KeyZ: "z",
-    };
-    const isTextTarget = (t) => {
-      if (!t) return false;
-      const tag = (t.tagName || "").toLowerCase();
-      return tag === "input" || tag === "textarea" || t.isContentEditable;
-    };
-    const syncState = () => {
-      setPressedKeys([...keyboardMoveRef.current].sort().join(""));
-    };
-    const onKeyDown = (e) => {
-      if (isTextTarget(e.target)) return;
-      const mapped = CODE_TO_KEY[e.code];
-      if (!mapped) return;
-      const before = keyboardMoveRef.current.size;
-      keyboardMoveRef.current.add(mapped);
-      if (keyboardMoveRef.current.size !== before) syncState();
-      e.preventDefault();
-    };
-    const onKeyUp = (e) => {
-      const mapped = CODE_TO_KEY[e.code];
-      if (mapped && keyboardMoveRef.current.has(mapped)) {
-        keyboardMoveRef.current.delete(mapped);
-        syncState();
-      }
-    };
     const onBlur = () => {
       if (keyboardMoveRef.current.size > 0) {
         keyboardMoveRef.current.clear();
-        syncState();
+        syncPressedKeys();
       }
     };
-    // Capture-phase + both window and document so any upstream handler
-    // that stopPropagation()s on a bubble-phase listener can't starve
-    // us. Belt and suspenders after the user reported that keys weren't
-    // registering at all.
     const opts = { capture: true };
-    window.addEventListener("keydown", onKeyDown, opts);
-    window.addEventListener("keyup", onKeyUp, opts);
+    window.addEventListener("keydown", flightKeyDown, opts);
+    window.addEventListener("keyup", flightKeyUp, opts);
     window.addEventListener("blur", onBlur);
-    document.addEventListener("keydown", onKeyDown, opts);
-    document.addEventListener("keyup", onKeyUp, opts);
+    document.addEventListener("keydown", flightKeyDown, opts);
+    document.addEventListener("keyup", flightKeyUp, opts);
+    // Auto-focus the root div so keys route to it from the start —
+    // this makes the onKeyDown on the root fire even without a click
+    // on the map first.
+    if (rootDivRef.current) {
+      try { rootDivRef.current.focus({ preventScroll: true }); } catch {}
+    }
     return () => {
-      window.removeEventListener("keydown", onKeyDown, opts);
-      window.removeEventListener("keyup", onKeyUp, opts);
+      window.removeEventListener("keydown", flightKeyDown, opts);
+      window.removeEventListener("keyup", flightKeyUp, opts);
       window.removeEventListener("blur", onBlur);
-      document.removeEventListener("keydown", onKeyDown, opts);
-      document.removeEventListener("keyup", onKeyUp, opts);
+      document.removeEventListener("keydown", flightKeyDown, opts);
+      document.removeEventListener("keyup", flightKeyUp, opts);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Right-click-to-copy: writes the clicked node's name to the system
@@ -4248,7 +4262,11 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
 
   return (
     <div
-      style={{ position: "relative", width: "100%", height: "100dvh", minHeight: 500, background: "radial-gradient(ellipse at center, #0A0A14 0%, #04040B 70%)", overflow: "hidden" }}
+      ref={rootDivRef}
+      tabIndex={0}
+      onKeyDown={flightKeyDown}
+      onKeyUp={flightKeyUp}
+      style={{ position: "relative", width: "100%", height: "100dvh", minHeight: 500, background: "radial-gradient(ellipse at center, #0A0A14 0%, #04040B 70%)", overflow: "hidden", outline: "none" }}
       onContextMenu={(e) => e.preventDefault()}
     >
       <Canvas
