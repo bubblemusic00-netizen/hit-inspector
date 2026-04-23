@@ -124,8 +124,8 @@ const MID_R      = 0.48;
 const SMALL_R    = 0.2;
 const ATTR_R     = 0.32;
 const MID_ORBIT  = 5.0;
-const SMALL_ORBIT= 2.8;    // was 1.8 — spread micros further from their sub
-                           // so they don't clip when scaled up
+const SMALL_ORBIT= 4.2;    // was 2.8 — micros float clearly away from parent
+                           // sub, no more crowding
 
 // Default size multipliers — applied on top of every tier's base radius.
 // The customization slider still reads "1.0×" at its default position,
@@ -197,32 +197,33 @@ function bandedBody(geom) {
   const pos = g.getAttribute("position");
   const n = pos.count;
   const colors = new Float32Array(n * 3);
-  // Brightness stops from south-pole (lat 0) to north-pole (lat 1).
-  // Gas-giant look — dark south, a bright "haze belt" in the upper third,
-  // slightly dimmer at the pole. Smoothly interpolated (not stepped), so
-  // the body reads as a gradient-with-bands, not a 4-color polyhedron.
-  // Values above 1.0 push the brightest latitudes into HDR territory (our
-  // materials use toneMapped:false), creating a natural specular-y glow on
-  // the bright belt — which is what sells the "planet with atmosphere" look.
-  const stops = [0.14, 0.22, 0.38, 0.32, 0.58, 0.92, 1.15, 0.86];
+  // 16 stops with irregular values — creates visible bright/dark bands
+  // rather than a smooth top-to-bottom gradient. Linear interp (not
+  // smoothstep) keeps band edges defined. Values >1.0 push brightest
+  // latitudes to HDR for the "atmospheric haze" look on gas giants.
+  const stops = [
+    0.08, 0.12, 0.22, 0.18,   // south pole: very dark with hint of variation
+    0.42, 0.28, 0.58, 0.40,   // lower mid: alternating dark/bright stripes
+    0.75, 1.25, 0.95, 1.10,   // bright belt (peak brightness ~north mid)
+    0.72, 0.92, 0.55, 0.30,   // top fade — not fully dark, gives the pole a lit dome feel
+  ];
   const nStops = stops.length - 1;
   for (let i = 0; i < n; i++) {
     const y = pos.getY(i);
     const x = pos.getX(i);
     const z = pos.getZ(i);
     const lat = (y + 1) * 0.5;
-    // Two-octave wave so the bands wobble organically, not ruler-straight.
+    // Stronger two-octave wave for more organic band wobble
     const wave =
-      Math.sin(x * 4.0 + z * 3.2) * 0.042 +
-      Math.cos(x * 7.2 - z * 5.5) * 0.018;
+      Math.sin(x * 3.5 + z * 2.8) * 0.055 +
+      Math.cos(x * 6.8 - z * 5.1) * 0.022;
     const t = Math.max(0, Math.min(0.9999, lat + wave));
     const p = t * nStops;
     const i0 = Math.floor(p);
     const i1 = Math.min(i0 + 1, nStops);
     const f = p - i0;
-    // Smoothstep — softer S-curve transitions than linear lerp.
-    const s = f * f * (3 - 2 * f);
-    const tint = stops[i0] * (1 - s) + stops[i1] * s;
+    // Linear interp — preserves visible band edges (smoothstep washed them out).
+    const tint = stops[i0] * (1 - f) + stops[i1] * f;
     colors[i*3] = tint; colors[i*3+1] = tint; colors[i*3+2] = tint;
   }
   g.setAttribute("color", new THREE.BufferAttribute(colors, 3));
@@ -325,12 +326,14 @@ const GLOW_TEX = (() => {
   canvas.width = size; canvas.height = size;
   const ctx = canvas.getContext("2d");
   const grad = ctx.createRadialGradient(size/2, size/2, 0, size/2, size/2, size/2);
-  // Steep-then-slow falloff — mimics how camera bloom looks in games.
-  grad.addColorStop(0.00, "rgba(255,255,255,1.0)");
-  grad.addColorStop(0.10, "rgba(255,255,255,0.85)");
-  grad.addColorStop(0.25, "rgba(255,255,255,0.45)");
-  grad.addColorStop(0.50, "rgba(255,255,255,0.15)");
-  grad.addColorStop(0.80, "rgba(255,255,255,0.03)");
+  // Softer, longer falloff than before — more "faded" aura, less "tight ball".
+  // Alpha curves down gradually so the glow blends into the sky rather than
+  // ending at a visible edge.
+  grad.addColorStop(0.00, "rgba(255,255,255,0.95)");
+  grad.addColorStop(0.08, "rgba(255,255,255,0.70)");
+  grad.addColorStop(0.20, "rgba(255,255,255,0.38)");
+  grad.addColorStop(0.40, "rgba(255,255,255,0.15)");
+  grad.addColorStop(0.65, "rgba(255,255,255,0.04)");
   grad.addColorStop(1.00, "rgba(255,255,255,0.00)");
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, size, size);
@@ -341,11 +344,12 @@ const GLOW_TEX = (() => {
   return tex;
 })();
 
-// Sizes in world units — tuned per tier so glow is ~2× the body radius.
-const GLOW_SIZE_BIG   = 6.5;
-const GLOW_SIZE_MID   = 3.2;
-const GLOW_SIZE_SMALL = 1.6;
-const GLOW_SIZE_ATTR  = 2.4;
+// Sizes in world units — roughly 3× the body radius so the halo reads
+// clearly around the note without hiding it. Tuned visually.
+const GLOW_SIZE_BIG   = 13.0;
+const GLOW_SIZE_MID   = 6.0;
+const GLOW_SIZE_SMALL = 3.0;
+const GLOW_SIZE_ATTR  = 4.5;
 
 function buildGlowMaterial(size) {
   const mat = new THREE.PointsMaterial({
@@ -751,7 +755,7 @@ function buildGenreLayout(data) {
     const gi_ = idToIdx["b:" + gName];
     Object.keys(tree[gName]).forEach(sName => {
       const si = idToIdx["m:" + gName + "/" + sName];
-      edges.push({ from: gi_, to: si, kind: "tree", strength: 2.6, ideal: 7.5 });
+      edges.push({ from: gi_, to: si, kind: "tree", strength: 2.6, ideal: 11.0 });
     });
   });
 
@@ -1293,30 +1297,19 @@ function focusLines(focused, layout) {
 }
 
 // Relatedness helpers for dim/highlight
-function isMidRelated(mid, focused, layout) {
+function isMidRelated(mid, focused, relatedMidSet) {
   if (!focused) return true;
   if (focused.kind === "big") return mid.parent === focused.name;
   if (focused.kind === "mid") return mid.name === focused.name && mid.parent === focused.parent;
   if (focused.kind === "small") return mid.name === focused.parent && mid.parent === focused.grandparent;
-  if (focused.kind === "attribute") {
-    const related = layout.attrToMids(focused, 999) || [];
-    return related.some(s => s.name === mid.name && s.parent === mid.parent);
-  }
+  if (focused.kind === "attribute") return relatedMidSet ? relatedMidSet.has(`${mid.parent}/${mid.name}`) : false;
   return false;
 }
 
-function isAttrRelated(attr, focused, layout) {
+function isAttrRelated(attr, focused, relatedAttrSet) {
   if (!focused) return true;
   if (focused.kind === "attribute") return focused.name === attr.name && focused.categoryId === attr.categoryId;
-  if (focused.kind === "mid") {
-    const related = layout.midToAttrs(focused) || [];
-    return related.some(r => r.node.categoryId === attr.categoryId && r.node.name === attr.name);
-  }
-  if (focused.kind === "big" && layout.bigAttrEdges) {
-    const related = layout.bigAttrEdges(focused) || [];
-    return related.some(r => r.node.categoryId === attr.categoryId && r.node.name === attr.name);
-  }
-  return false;
+  return relatedAttrSet ? relatedAttrSet.has(`${attr.categoryId}:${attr.name}`) : false;
 }
 
 // ── 3D Components ──────────────────────────────────────────────────
@@ -1351,10 +1344,10 @@ function BigNoteNode({ b, focused, sizeMult, showLabel, onSelect, onHover }) {
           <primitive object={BIG_NOTE_GEOM} attach="geometry" />
           <meshStandardMaterial
             color={b.color} emissive={b.color}
-            emissiveIntensity={isF ? 2.4 : (dim ? 0.3 : 1.1)}
+            emissiveIntensity={isF ? 2.4 : (dim ? 0.45 : 1.1)}
             metalness={0.6} roughness={0.25}
             vertexColors
-            toneMapped={false} opacity={dim ? 0.45 : 1} transparent={dim}
+            toneMapped={false}
           />
         </mesh>
         {/* Glow — camera-facing billboard with gradient texture,
@@ -1419,7 +1412,7 @@ function BigNodes({ bigs, focused, layout, onSelect, onHover, sizeMult = 1, show
 // Mids — raw InstancedMesh so we can mutate per-instance matrices every
 // frame (for the self-spin). Colors are written once via setColorAt;
 // matrices are rewritten each frame with focus scale + spin angle.
-function MidNodes({ mids, focused, layout, onSelect, onHover, sizeMult = 1 }) {
+function MidNodes({ mids, focused, layout, onSelect, onHover, sizeMult = 1, relatedMidSet = null }) {
   const meshRef = useRef();
   const glowRef = useRef();
   const tmpObj = useMemo(() => new THREE.Object3D(), []);
@@ -1465,7 +1458,7 @@ function MidNodes({ mids, focused, layout, onSelect, onHover, sizeMult = 1 }) {
       const s = mids[i];
       const sd = spinData[i];
       const isF = focused?.kind === "mid" && focused.name === s.name && focused.parent === s.parent;
-      const rel = isMidRelated(s, focused, layout);
+      const rel = isMidRelated(s, focused, relatedMidSet);
       const dim = focused && !rel;
       const scl = isF ? 1.85 : (rel && focused ? 1.40 : (dim ? 0.65 : 1));
       tmpObj.position.set(s.pos[0], s.pos[1], s.pos[2]);
@@ -1499,7 +1492,7 @@ function MidNodes({ mids, focused, layout, onSelect, onHover, sizeMult = 1 }) {
         <primitive object={NOTE_GEOM} attach="geometry" />
         <primitive object={MAT_MID} attach="material" />
       </instancedMesh>
-      <points ref={glowRef} raycast={() => null}>
+      <points ref={glowRef} raycast={() => null} key={`glow-${mids?.length ?? smalls?.length ?? attributes?.length}`}>
         <bufferGeometry>
           <bufferAttribute attach="attributes-position" args={[glowPos, 3]} />
           <bufferAttribute attach="attributes-color" args={[glowCol, 3]} />
@@ -1625,7 +1618,7 @@ function SmallNodes({ smalls, focused, onSelect, onHover, sizeMult = 1, layout }
         <primitive object={NOTE_GEOM} attach="geometry" />
         <primitive object={MAT_SMALL} attach="material" />
       </instancedMesh>
-      <points ref={glowRef} raycast={() => null}>
+      <points ref={glowRef} raycast={() => null} key={`glow-${mids?.length ?? smalls?.length ?? attributes?.length}`}>
         <bufferGeometry>
           <bufferAttribute attach="attributes-position" args={[glowPos, 3]} />
           <bufferAttribute attach="attributes-color" args={[glowCol, 3]} />
@@ -1639,7 +1632,7 @@ function SmallNodes({ smalls, focused, onSelect, onHover, sizeMult = 1, layout }
 
 // Attrs — self-rotate in place (no orbit, since they float in a cloud
 // that isn't parented to any single node).
-function AttributeNodes({ attributes, focused, layout, onSelect, onHover, sizeMult = 1 }) {
+function AttributeNodes({ attributes, focused, layout, onSelect, onHover, sizeMult = 1, relatedAttrSet = null }) {
   const meshRef = useRef();
   const glowRef = useRef();
   const tmpObj = useMemo(() => new THREE.Object3D(), []);
@@ -1687,7 +1680,7 @@ function AttributeNodes({ attributes, focused, layout, onSelect, onHover, sizeMu
       const a = attributes[i];
       const sd = spinData[i];
       const isF = focused?.kind === "attribute" && focused.name === a.name && focused.categoryId === a.categoryId;
-      const rel = isAttrRelated(a, focused, layout);
+      const rel = isAttrRelated(a, focused, relatedAttrSet);
       const dim = focused && !isF && !rel;
       const scl = isF ? 2.3 : (rel && focused ? 1.55 : (dim ? 0.65 : 1));
       tmpObj.position.set(a.pos[0], a.pos[1], a.pos[2]);
@@ -1717,7 +1710,7 @@ function AttributeNodes({ attributes, focused, layout, onSelect, onHover, sizeMu
         <primitive object={NOTE_GEOM} attach="geometry" />
         <primitive object={MAT_ATTR} attach="material" />
       </instancedMesh>
-      <points ref={glowRef} raycast={() => null}>
+      <points ref={glowRef} raycast={() => null} key={`glow-${mids?.length ?? smalls?.length ?? attributes?.length}`}>
         <bufferGeometry>
           <bufferAttribute attach="attributes-position" args={[glowPos, 3]} />
           <bufferAttribute attach="attributes-color" args={[glowCol, 3]} />
@@ -1741,11 +1734,35 @@ function InteractiveEdges({
   widthBase = 2.4, widthHover = 4.5,
 }) {
   if (!visible || !edges.length) return null;
+  // Per-endpoint shortening based on node kind — stops the line geometry
+  // from reaching inside the body (so clicks on the body aren't eaten by
+  // the line's hit-test strip, and the line visually looks like it anchors
+  // on the body's surface, not its center).
+  const nodeMargin = (k) => {
+    switch (k) {
+      case "big":       return 1.5;   // ~BIG_R * BIG_MULT * 0.8
+      case "mid":       return 0.62;  // ~MID_R * MID_MULT * 0.9
+      case "small":     return 0.30;
+      case "attribute": return 0.45;
+      default:          return 0.45;
+    }
+  };
   return (
     <>
       {edges.map((e, i) => {
+        const dx = e.to[0] - e.from[0];
+        const dy = e.to[1] - e.from[1];
+        const dz = e.to[2] - e.from[2];
+        const len = Math.sqrt(dx*dx + dy*dy + dz*dz);
+        if (len < 0.001) return null;
+        // Clamp so a short edge doesn't end up negative-length.
+        const mFrom = Math.min(nodeMargin(e.fromNode?.kind), len * 0.35);
+        const mTo   = Math.min(nodeMargin(e.toNode?.kind),   len * 0.35);
+        const tFrom = mFrom / len;
+        const tTo   = mTo   / len;
+        const from = [e.from[0] + dx*tFrom, e.from[1] + dy*tFrom, e.from[2] + dz*tFrom];
+        const to   = [e.to[0]   - dx*tTo,   e.to[1]   - dy*tTo,   e.to[2]   - dz*tTo];
         const isHov = i === hoveredIndex;
-        // Kind-based base opacity — tree edges read strongest, compl/attr dimmer.
         const baseOp = e.kind === "tree" ? 0.85
                      : e.kind === "attr" ? 0.62
                      : e.kind === "compl" ? 0.55
@@ -1753,7 +1770,7 @@ function InteractiveEdges({
         return (
           <Line
             key={i}
-            points={[e.from, e.to]}
+            points={[from, to]}
             color={isHov ? "#ffffff" : (e.color || "#5E6AD2")}
             lineWidth={isHov ? widthHover : widthBase}
             transparent
@@ -1973,9 +1990,14 @@ function MultiSelectList({ items, selected, onChange, maxHeight = 170, query = "
 
   const toggle = (v) => {
     // Starting from "all" (null): first click picks ONLY that value.
+    // If user is actively typing in the search box, clicks are always
+    // exclusive-select — the point of search-and-click is "narrow to this one".
     // Otherwise toggle membership. If result equals full set → null.
+    const activeSearch = !!(query && query.trim());
     let next;
-    if (!selected) {
+    if (activeSearch) {
+      next = selected?.has(v) && selected.size === 1 ? null : new Set([v]);
+    } else if (!selected) {
       next = new Set([v]);
     } else if (selected.has(v)) {
       next = new Set(selected);
@@ -2902,6 +2924,29 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
 
   const lines = useMemo(() => focusLines(focused, layout), [focused, layout]);
 
+  // Pre-compute "who is related to the currently-focused node" sets so the
+  // per-frame scale/dim loop inside each tier doesn't call expensive layout
+  // lookups 1000× per frame. Big perf win when focus sits on an attribute
+  // with many mid relations, or on a big with many attr edges.
+  const relatedMidSet = useMemo(() => {
+    if (!focused || focused.kind !== "attribute") return null;
+    if (!layout.attrToMids) return null;
+    const s = new Set();
+    (layout.attrToMids(focused, 9999) || []).forEach(m => s.add(`${m.parent}/${m.name}`));
+    return s;
+  }, [focused, layout]);
+
+  const relatedAttrSet = useMemo(() => {
+    if (!focused) return null;
+    const s = new Set();
+    if (focused.kind === "mid" && layout.midToAttrs) {
+      (layout.midToAttrs(focused) || []).forEach(r => s.add(`${r.node.categoryId}:${r.node.name}`));
+    } else if (focused.kind === "big" && layout.bigAttrEdges) {
+      (layout.bigAttrEdges(focused) || []).forEach(r => s.add(`${r.node.categoryId}:${r.node.name}`));
+    }
+    return s;
+  }, [focused, layout]);
+
   const allEdges = useMemo(() => {
     const out = [];
     for (const m of visibleMids) {
@@ -2961,6 +3006,12 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
     setFilters({ bigs: null, mids: null, smalls: null, attrCats: null, attrs: null });
     setSearch("");
     setResetCount(c => c + 1);
+    // Pause auto-rotate briefly so the reset lerp doesn't tug-of-war with
+    // the OrbitControls rotating the camera around the target. Without this,
+    // reset visibly jitters back and forth.
+    setInteracting(true);
+    if (interactionTimer.current) clearTimeout(interactionTimer.current);
+    interactionTimer.current = setTimeout(() => setInteracting(false), 1800);
   };
 
   const handleResetCustomization = () => {
@@ -3020,7 +3071,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
 
           {layers.mids && (
             <MidNodes mids={visibleMids} focused={focused} layout={layout} onSelect={selectMid} onHover={setHovered}
-                      sizeMult={nodeSizes.mid} />
+                      sizeMult={nodeSizes.mid} relatedMidSet={relatedMidSet} />
           )}
 
           {layout.hasSmalls && layers.mids && layers.smalls && (
@@ -3030,7 +3081,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
 
           {layout.hasAttrs && layers.attributes && (
             <AttributeNodes attributes={visibleAttributes} focused={focused} layout={layout} onSelect={selectAttr} onHover={setHovered}
-                            sizeMult={nodeSizes.attr} />
+                            sizeMult={nodeSizes.attr} relatedAttrSet={relatedAttrSet} />
           )}
 
           {linesMode === "on" && (
