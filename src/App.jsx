@@ -1,42 +1,24 @@
 import React, { useEffect, useState } from "react";
 import { T } from "./theme.js";
 import Layout from "./components/Layout.jsx";
-import CategoryPage from "./components/CategoryPage.jsx";
+import CategoryMap3D from "./components/CategoryMap3D.jsx";
 import OverviewPage from "./components/OverviewPage.jsx";
 import SearchPage from "./components/SearchPage.jsx";
-import GenreMap3D from "./components/GenreMap3D.jsx";
 import { CATEGORIES, buildDerivedData } from "./categories.js";
 
-// Read the URL hash (#page-id) once at startup. Supports deep-linking
-// to pages that aren't yet in the sidebar (e.g. "#map3d" while the
-// 3D map page is still being rolled out).
-function readHashPage() {
-  if (typeof window === "undefined") return null;
-  const h = window.location.hash.replace(/^#/, "").trim();
-  return h || null;
-}
-
 export default function App() {
-  const [raw, setRaw] = useState(null);       // { sourcePath, sourceModified, data: {...} }
+  const [raw, setRaw] = useState(null);
   const [error, setError] = useState(null);
-  const [selected, setSelected] = useState(() => readHashPage() || "overview");
-  const [tab, setTab] = useState("items");    // "items" | "family" | "stats"
-  // preselect: optional target inside a category (e.g. preselect the
-  // Euphoric row in Moods Family). Search sets this; sidebar clears it.
+  const [selected, setSelected] = useState("overview");
+  const [tab, setTab] = useState("items");
   const [preselect, setPreselect] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
-    // Try the static snapshot first (production: served from public/),
-    // fall back to the live dev plugin if no snapshot exists. This lets
-    // the same bundle work both during `npm run dev` and when deployed
-    // to Vercel after `npm run build`.
     async function load() {
       try {
         let response = await fetch("/data.json");
-        if (!response.ok) {
-          response = await fetch("/api/data");
-        }
+        if (!response.ok) response = await fetch("/api/data");
         const json = await response.json();
         if (cancelled) return;
         if (json.error) setError(json);
@@ -49,38 +31,16 @@ export default function App() {
     return () => { cancelled = true; };
   }, []);
 
-  // Sync selected page with URL hash changes (back/forward nav, manual
-  // edits). Only reacts to hash changes — not full reloads.
-  useEffect(() => {
-    const onHash = () => {
-      const p = readHashPage();
-      if (p) setSelected(p);
-    };
-    window.addEventListener("hashchange", onHash);
-    return () => window.removeEventListener("hashchange", onHash);
-  }, []);
-
-  // Reset tab when switching categories so users don't land on a tab
-  // that doesn't make sense for the new category (e.g. Family for
-  // Languages, which has no family data).
   useEffect(() => { setTab("items"); }, [selected]);
 
-  // Sidebar nav → clear preselect (search-originated preselect shouldn't
-  // persist across a fresh sidebar click).
   const handleSidebarSelect = (id) => {
     setPreselect(null);
     setSelected(id);
   };
 
-  // Search result click → set category + preselect + appropriate tab.
-  // Search results from genres / instruments go to the Family tab
-  // (where the hierarchy is browsable). Flat catalogs also go to Family
-  // (so the picker preselects the matched item). Artists also route to
-  // genres → Family so you see the genre home of that artist.
-  const handleSearchResultClick = (categoryId, preselectTarget, preferredTab) => {
+  const handleSearchResultClick = (categoryId, preselectTarget) => {
     setSelected(categoryId);
     setPreselect(preselectTarget);
-    setTab(preferredTab || "family");
   };
 
   if (error) return <ErrorScreen error={error} />;
@@ -88,31 +48,29 @@ export default function App() {
 
   const derived = buildDerivedData(raw.data);
 
+  // Every CATEGORY is rendered as a 3D galaxy via CategoryMap3D.
+  //   Genres / Subgenres / Microstyles — 18 genres → 294 subs → 1180 micros
+  //   Instruments                      — 17 families → instruments → articulations
+  //   Moods                            — 5 mood-cats → 40 moods (no smalls)
+  //   Other flat categories            — 1 hub → items (no smalls), with attr cloud
+  //   Languages                        — 1 hub → 22 languages (no attrs)
   let mainContent;
   if (selected === "overview") {
     mainContent = <OverviewPage raw={raw} derived={derived} />;
   } else if (selected === "search") {
     mainContent = <SearchPage data={raw.data} onResultClick={handleSearchResultClick} />;
   } else if (selected === "map3d") {
-    mainContent = <GenreMap3D data={raw.data} />;
+    mainContent = <CategoryMap3D categoryId="genres" data={raw.data} />;
   } else {
     const cat = CATEGORIES.find(c => c.id === selected);
-    if (!cat) mainContent = <div style={{ padding: T.s6 }}>Unknown category.</div>;
-    else mainContent = (
-      <CategoryPage
-        category={cat}
-        raw={raw.data}
-        derived={derived}
-        tab={tab}
-        onTab={setTab}
-        preselect={preselect}
-        onPreselectConsumed={() => setPreselect(null)}
-      />
-    );
+    if (!cat) {
+      mainContent = <div style={{ padding: T.s6 }}>Unknown category.</div>;
+    } else {
+      mainContent = <CategoryMap3D categoryId={cat.id} data={raw.data} />;
+    }
   }
 
-  const isChromeless = selected === "overview" || selected === "search" || selected === "map3d";
-
+  // Hide the items/family/stats tab strip — the 3D map is the single view.
   return (
     <Layout
       selected={selected}
@@ -121,7 +79,7 @@ export default function App() {
       sourceModified={raw.sourceModified}
       tab={tab}
       onTab={setTab}
-      showTabs={!isChromeless}
+      showTabs={false}
     >
       {mainContent}
     </Layout>
