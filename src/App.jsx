@@ -4,12 +4,22 @@ import Layout from "./components/Layout.jsx";
 import CategoryPage from "./components/CategoryPage.jsx";
 import OverviewPage from "./components/OverviewPage.jsx";
 import SearchPage from "./components/SearchPage.jsx";
+import GenreMap3D from "./components/GenreMap3D.jsx";
 import { CATEGORIES, buildDerivedData } from "./categories.js";
+
+// Read the URL hash (#page-id) once at startup. Supports deep-linking
+// to pages that aren't yet in the sidebar (e.g. "#map3d" while the
+// 3D map page is still being rolled out).
+function readHashPage() {
+  if (typeof window === "undefined") return null;
+  const h = window.location.hash.replace(/^#/, "").trim();
+  return h || null;
+}
 
 export default function App() {
   const [raw, setRaw] = useState(null);       // { sourcePath, sourceModified, data: {...} }
   const [error, setError] = useState(null);
-  const [selected, setSelected] = useState("overview");
+  const [selected, setSelected] = useState(() => readHashPage() || "overview");
   const [tab, setTab] = useState("items");    // "items" | "family" | "stats"
   // preselect: optional target inside a category (e.g. preselect the
   // Euphoric row in Moods Family). Search sets this; sidebar clears it.
@@ -37,6 +47,17 @@ export default function App() {
     }
     load();
     return () => { cancelled = true; };
+  }, []);
+
+  // Sync selected page with URL hash changes (back/forward nav, manual
+  // edits). Only reacts to hash changes — not full reloads.
+  useEffect(() => {
+    const onHash = () => {
+      const p = readHashPage();
+      if (p) setSelected(p);
+    };
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
   }, []);
 
   // Reset tab when switching categories so users don't land on a tab
@@ -72,6 +93,8 @@ export default function App() {
     mainContent = <OverviewPage raw={raw} derived={derived} />;
   } else if (selected === "search") {
     mainContent = <SearchPage data={raw.data} onResultClick={handleSearchResultClick} />;
+  } else if (selected === "map3d") {
+    mainContent = <GenreMap3D genreTree={raw.data.GENRE_TREE} />;
   } else {
     const cat = CATEGORIES.find(c => c.id === selected);
     if (!cat) mainContent = <div style={{ padding: T.s6 }}>Unknown category.</div>;
@@ -88,6 +111,8 @@ export default function App() {
     );
   }
 
+  const isChromeless = selected === "overview" || selected === "search" || selected === "map3d";
+
   return (
     <Layout
       selected={selected}
@@ -96,7 +121,7 @@ export default function App() {
       sourceModified={raw.sourceModified}
       tab={tab}
       onTab={setTab}
-      showTabs={selected !== "overview" && selected !== "search"}
+      showTabs={!isChromeless}
     >
       {mainContent}
     </Layout>
