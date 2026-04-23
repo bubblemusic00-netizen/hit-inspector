@@ -200,16 +200,27 @@ function buildGraph(data) {
 
 // ── Force-directed 3D layout ───────────────────────────────────────
 // Each edge pulls its endpoints toward ideal length; all nodes repel.
-// Runs 140 iterations with cooling. One-time, on mount.
-function runForceLayout(nodes, edges, iterations = 140) {
+// Runs 200 iterations with cooling. One-time, on mount.
+//
+// Numerical safeguards:
+//   • Spring forces are divided by sqrt(degree) of both endpoints so
+//     highly-connected nodes don't get over-pulled (standard in FDL).
+//   • Per-step displacement is clamped to MAX_STEP to prevent any
+//     single iteration from sending a node to infinity.
+//   • Final positions are sanitized against NaN.
+function runForceLayout(nodes, edges, iterations = 200) {
   const n = nodes.length;
   const rand = mulberry32(1337);
 
-  // Initialize: random spread in a sphere of radius ~28
+  // Precompute degree for normalization
+  const degree = new Float32Array(n);
+  for (const e of edges) { degree[e.from]++; degree[e.to]++; }
+
+  // Initialize with moderate spread (random points in sphere of radius 10-18)
   for (let i = 0; i < n; i++) {
     const th = rand() * Math.PI * 2;
     const ph = Math.acos(2 * rand() - 1);
-    const r  = 18 + rand() * 14;
+    const r  = 10 + rand() * 8;
     nodes[i].pos = [
       r * Math.sin(ph) * Math.cos(th),
       r * Math.sin(ph) * Math.sin(th),
@@ -217,57 +228,77 @@ function runForceLayout(nodes, edges, iterations = 140) {
     ];
   }
 
-  const IDEAL        = 3.0;   // desired edge length
-  const SPRING_K     = 0.10;  // edge spring strength
-  const REPULSION_K  = 1.2;   // coulomb repulsion
-  const GRAVITY_K    = 0.003; // light pull toward origin
+  const IDEAL       = 4.0;   // desired edge length
+  const SPRING_K    = 0.08;  // edge spring coefficient
+  const REPULSION_K = 15.0;  // coulomb repulsion coefficient
+  const GRAVITY_K   = 0.015; // pull toward origin (keeps graph from drifting)
+  const MAX_STEP    = 1.2;   // max per-iteration displacement clamp
 
-  // Reuse force array across iterations
   const fx = new Float32Array(n), fy = new Float32Array(n), fz = new Float32Array(n);
 
   for (let iter = 0; iter < iterations; iter++) {
     for (let i = 0; i < n; i++) { fx[i] = 0; fy[i] = 0; fz[i] = 0; }
-    const temp = 1.0 * Math.pow(0.985, iter);
+    const temp = 1.0 * Math.pow(0.988, iter);
 
-    // Spring attraction for edges
+    // Spring attraction for edges, normalized by endpoint degree
     for (const e of edges) {
       const a = nodes[e.from], b = nodes[e.to];
       const dx = b.pos[0] - a.pos[0];
       const dy = b.pos[1] - a.pos[1];
       const dz = b.pos[2] - a.pos[2];
       const dist = Math.sqrt(dx * dx + dy * dy + dz * dz) + 0.01;
-      const f = (dist - IDEAL) * SPRING_K * e.strength;
-      const fxv = dx / dist * f, fyv = dy / dist * f, fzv = dz / dist * f;
-      fx[e.from] += fxv; fy[e.from] += fyv; fz[e.from] += fzv;
-      fx[e.to]   -= fxv; fy[e.to]   -= fyv; fz[e.to]   -= fzv;
+      // Cap (dist - IDEAL) so a very far edge doesn't yank a node
+      const delta = Math.max(-10, Math.min(dist - IDEAL, 15));
+      const degNorm = 1 / Math.sqrt(degree[e.from] * degree[e.to] + 1);
+      const f = delta * SPRING_K * e.strength * degNorm;
+      const ux = dx / dist, uy = dy / dist, uz = dz / dist;
+      fx[e.from] += ux * f; fy[e.from] += uy * f; fz[e.from] += uz * f;
+      fx[e.to]   -= ux * f; fy[e.to]   -= uy * f; fz[e.to]   -= uz * f;
     }
 
-    // Coulomb repulsion — all pairs (O(N²), but N ~= 536)
+    // Coulomb repulsion (all pairs)
     for (let i = 0; i < n; i++) {
       const ax = nodes[i].pos[0], ay = nodes[i].pos[1], az = nodes[i].pos[2];
       for (let j = i + 1; j < n; j++) {
         const dx = nodes[j].pos[0] - ax;
         const dy = nodes[j].pos[1] - ay;
         const dz = nodes[j].pos[2] - az;
-        const distSq = dx * dx + dy * dy + dz * dz + 0.1;
+        const distSq = dx * dx + dy * dy + dz * dz + 0.5;
         const dist = Math.sqrt(distSq);
         const f = -REPULSION_K / distSq;
-        const fxv = dx / dist * f, fyv = dy / dist * f, fzv = dz / dist * f;
-        fx[i] += fxv; fy[i] += fyv; fz[i] += fzv;
-        fx[j] -= fxv; fy[j] -= fyv; fz[j] -= fzv;
+        const ux = dx / dist, uy = dy / dist, uz = dz / dist;
+        fx[i] += ux * f; fy[i] += uy * f; fz[i] += uz * f;
+        fx[j] -= ux * f; fy[j] -= uy * f; fz[j] -= uz * f;
       }
     }
 
-    // Apply forces + weak center gravity
+    // Apply forces + center gravity, with per-step displacement clamp
     for (let i = 0; i < n; i++) {
       const p = nodes[i].pos;
       fx[i] -= p[0] * GRAVITY_K;
       fy[i] -= p[1] * GRAVITY_K;
       fz[i] -= p[2] * GRAVITY_K;
       const m = nodes[i].mass;
-      p[0] += (fx[i] / m) * temp;
-      p[1] += (fy[i] / m) * temp;
-      p[2] += (fz[i] / m) * temp;
+      let dx = (fx[i] / m) * temp;
+      let dy = (fy[i] / m) * temp;
+      let dz = (fz[i] / m) * temp;
+      // Clamp per-step displacement
+      const step = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (step > MAX_STEP) {
+        const s = MAX_STEP / step;
+        dx *= s; dy *= s; dz *= s;
+      }
+      p[0] += dx; p[1] += dy; p[2] += dz;
+    }
+  }
+
+  // Sanitize any NaN/Infinity (shouldn't happen with clamping, but safety net)
+  for (let i = 0; i < n; i++) {
+    const p = nodes[i].pos;
+    if (!isFinite(p[0]) || !isFinite(p[1]) || !isFinite(p[2])) {
+      p[0] = (rand() - 0.5) * 30;
+      p[1] = (rand() - 0.5) * 30;
+      p[2] = (rand() - 0.5) * 30;
     }
   }
 }
@@ -276,7 +307,7 @@ function runForceLayout(nodes, edges, iterations = 140) {
 
 function buildLayout(data) {
   const { nodes, edges, idToIdx } = buildGraph(data);
-  runForceLayout(nodes, edges, 140);
+  runForceLayout(nodes, edges, 200);
 
   // Partition nodes by kind for easier rendering
   const genres     = [];
@@ -666,7 +697,7 @@ export default function GenreMap3D({ data }) {
 
   return (
     <div style={{ position: "relative", width: "100%", height: "calc(100vh - 80px)", minHeight: 500, background: "#04040B", overflow: "hidden" }}>
-      <Canvas camera={{ position: [0, 10, 85], fov: 52, near: 0.1, far: 600 }} dpr={[1, 2]} onPointerMissed={() => setFocused(null)}>
+      <Canvas camera={{ position: [0, 15, 130], fov: 50, near: 0.1, far: 800 }} dpr={[1, 2]} onPointerMissed={() => setFocused(null)}>
         <color attach="background" args={["#04040B"]} />
         <ambientLight intensity={0.32} />
         <pointLight position={[0, 0, 0]} intensity={0.6} distance={220} />
@@ -692,7 +723,7 @@ export default function GenreMap3D({ data }) {
           <HoverTooltip hovered={hovered} />
         </Suspense>
 
-        <OrbitControls ref={controlsRef} enableDamping dampingFactor={0.07} minDistance={2} maxDistance={180} rotateSpeed={0.55} zoomSpeed={0.9} panSpeed={0.6} />
+        <OrbitControls ref={controlsRef} enableDamping dampingFactor={0.07} minDistance={2} maxDistance={260} rotateSpeed={0.55} zoomSpeed={0.9} panSpeed={0.6} />
         <CameraRig focusTarget={focused} controlsRef={controlsRef} />
       </Canvas>
 
