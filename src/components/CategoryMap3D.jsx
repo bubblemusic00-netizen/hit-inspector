@@ -376,14 +376,17 @@ const GLOW_TEX = (() => {
   canvas.width = size; canvas.height = size;
   const ctx = canvas.getContext("2d");
   const grad = ctx.createRadialGradient(size/2, size/2, 0, size/2, size/2, size/2);
-  // Softer, longer falloff than before — more "faded" aura, less "tight ball".
-  // Alpha curves down gradually so the glow blends into the sky rather than
-  // ending at a visible edge.
-  grad.addColorStop(0.00, "rgba(255,255,255,0.95)");
-  grad.addColorStop(0.08, "rgba(255,255,255,0.70)");
-  grad.addColorStop(0.20, "rgba(255,255,255,0.38)");
-  grad.addColorStop(0.40, "rgba(255,255,255,0.15)");
-  grad.addColorStop(0.65, "rgba(255,255,255,0.04)");
+  // Corona-style falloff: hot core that stays bright longer, then a
+  // slow fade into space. The previous curve dropped to 38% alpha by
+  // r=0.20, which read as a tight halo — this version keeps meaningful
+  // brightness out to r=0.55 so the aura extends several body-widths
+  // past the sphere before dissolving.
+  grad.addColorStop(0.00, "rgba(255,255,255,0.98)");
+  grad.addColorStop(0.10, "rgba(255,255,255,0.82)");
+  grad.addColorStop(0.22, "rgba(255,255,255,0.58)");
+  grad.addColorStop(0.38, "rgba(255,255,255,0.34)");
+  grad.addColorStop(0.55, "rgba(255,255,255,0.18)");
+  grad.addColorStop(0.75, "rgba(255,255,255,0.07)");
   grad.addColorStop(1.00, "rgba(255,255,255,0.00)");
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, size, size);
@@ -394,12 +397,14 @@ const GLOW_TEX = (() => {
   return tex;
 })();
 
-// Sizes in world units — roughly 3× the body radius so the halo reads
-// clearly around the note without hiding it. Tuned visually.
-const GLOW_SIZE_BIG   = 13.0;
-const GLOW_SIZE_MID   = 6.0;
-const GLOW_SIZE_SMALL = 3.0;
-const GLOW_SIZE_ATTR  = 4.5;
+// Halo sizes in world units. Big genre nodes get a much bigger corona
+// than the other tiers — these are the hubs of the universe and should
+// feel like small suns, not tight dots. Mids/smalls/attrs stay modest
+// so the view doesn't turn into a blur of overlapping halos.
+const GLOW_SIZE_BIG   = 24.0;
+const GLOW_SIZE_MID   = 6.5;
+const GLOW_SIZE_SMALL = 3.2;
+const GLOW_SIZE_ATTR  = 4.8;
 
 function buildGlowMaterial(size) {
   const mat = new THREE.PointsMaterial({
@@ -1367,7 +1372,7 @@ function isAttrRelated(attr, focused, relatedAttrSet) {
 // One rotating note for a big (genre hub). Kept as its own component so
 // each big has its own ref + useFrame spinning loop. Label sits OUTSIDE
 // the rotating group so text stays horizontal while the note turns.
-function BigNoteNode({ b, focused, sizeMult, showLabel, onSelect, onHover }) {
+function BigNoteNode({ b, focused, sizeMult, showLabel, onSelect, onHover, onCopy }) {
   const spinRef = useRef();
   const sp = useMemo(() => {
     const s = hash01(b.name + "/spin");
@@ -1423,6 +1428,7 @@ function BigNoteNode({ b, focused, sizeMult, showLabel, onSelect, onHover }) {
       <group ref={spinRef} rotation={[0, sp.phase, 0]}>
         <mesh
           onClick={e => { e.stopPropagation(); onSelect(b); }}
+          onContextMenu={e => { e.stopPropagation(); onCopy?.(b.name); }}
           onPointerOver={e => { e.stopPropagation(); onHover(b); }}
           onPointerOut={e => { e.stopPropagation(); onHover(null); }}
         >
@@ -1447,7 +1453,7 @@ function BigNoteNode({ b, focused, sizeMult, showLabel, onSelect, onHover }) {
             />
           </bufferGeometry>
           <pointsMaterial
-            size={isF ? GLOW_SIZE_BIG * 1.4 : GLOW_SIZE_BIG}
+            size={isF ? GLOW_SIZE_BIG * 1.7 : GLOW_SIZE_BIG}
             map={GLOW_TEX}
             vertexColors
             transparent
@@ -1455,7 +1461,7 @@ function BigNoteNode({ b, focused, sizeMult, showLabel, onSelect, onHover }) {
             depthWrite={false}
             sizeAttenuation
             toneMapped={false}
-            opacity={isF ? 1.0 : (dim ? 0.25 : 0.7)}
+            opacity={isF ? 1.0 : (dim ? 0.28 : 0.85)}
           />
         </points>
       </group>
@@ -1476,13 +1482,13 @@ function BigNoteNode({ b, focused, sizeMult, showLabel, onSelect, onHover }) {
   );
 }
 
-function BigNodes({ bigs, focused, layout, onSelect, onHover, sizeMult = 1, showLabel = true }) {
+function BigNodes({ bigs, focused, layout, onSelect, onHover, onCopy, sizeMult = 1, showLabel = true }) {
   return (
     <>
       {bigs.map(b => (
         <BigNoteNode key={b.name} b={b} focused={focused}
           sizeMult={sizeMult} showLabel={showLabel}
-          onSelect={onSelect} onHover={onHover} />
+          onSelect={onSelect} onHover={onHover} onCopy={onCopy} />
       ))}
     </>
   );
@@ -1491,7 +1497,7 @@ function BigNodes({ bigs, focused, layout, onSelect, onHover, sizeMult = 1, show
 // Mids — raw InstancedMesh so we can mutate per-instance matrices every
 // frame (for the self-spin). Colors are written once via setColorAt;
 // matrices are rewritten each frame with focus scale + spin angle.
-function MidNodes({ mids, focused, layout, onSelect, onHover, sizeMult = 1, relatedMidSet = null }) {
+function MidNodes({ mids, focused, layout, onSelect, onHover, onCopy, sizeMult = 1, relatedMidSet = null }) {
   const meshRef = useRef();
   const glowRef = useRef();
   const tmpObj = useMemo(() => new THREE.Object3D(), []);
@@ -1565,6 +1571,7 @@ function MidNodes({ mids, focused, layout, onSelect, onHover, sizeMult = 1, rela
         ref={meshRef}
         args={[undefined, undefined, mids.length]}
         onClick={e => { e.stopPropagation(); if (e.instanceId != null) onSelect(mids[e.instanceId]); }}
+        onContextMenu={e => { e.stopPropagation(); if (e.instanceId != null) onCopy?.(mids[e.instanceId].name); }}
         onPointerOver={e => { e.stopPropagation(); if (e.instanceId != null) onHover(mids[e.instanceId]); }}
         onPointerOut={e => { e.stopPropagation(); onHover(null); }}
       >
@@ -1588,7 +1595,7 @@ function MidNodes({ mids, focused, layout, onSelect, onHover, sizeMult = 1, rela
 // layout-time position; we rotate that offset around a per-small random
 // axis each frame, keeping the orbit plane stable but different for
 // every micro so they don't all orbit in the same plane.
-function SmallNodes({ smalls, focused, onSelect, onHover, sizeMult = 1, layout, livePosRef = null }) {
+function SmallNodes({ smalls, focused, onSelect, onHover, onCopy, sizeMult = 1, layout, livePosRef = null }) {
   const meshRef = useRef();
   const glowRef = useRef();
   const tmpObj = useMemo(() => new THREE.Object3D(), []);
@@ -1696,6 +1703,7 @@ function SmallNodes({ smalls, focused, onSelect, onHover, sizeMult = 1, layout, 
         ref={meshRef}
         args={[undefined, undefined, smalls.length]}
         onClick={e => { e.stopPropagation(); if (e.instanceId != null) onSelect(smalls[e.instanceId]); }}
+        onContextMenu={e => { e.stopPropagation(); if (e.instanceId != null) onCopy?.(smalls[e.instanceId].name); }}
         onPointerOver={e => { e.stopPropagation(); if (e.instanceId != null) onHover(smalls[e.instanceId]); }}
         onPointerOut={e => { e.stopPropagation(); onHover(null); }}
       >
@@ -1716,7 +1724,7 @@ function SmallNodes({ smalls, focused, onSelect, onHover, sizeMult = 1, layout, 
 
 // Attrs — self-rotate in place (no orbit, since they float in a cloud
 // that isn't parented to any single node).
-function AttributeNodes({ attributes, focused, layout, onSelect, onHover, sizeMult = 1, relatedAttrSet = null }) {
+function AttributeNodes({ attributes, focused, layout, onSelect, onHover, onCopy, sizeMult = 1, relatedAttrSet = null }) {
   const meshRef = useRef();
   const glowRef = useRef();
   const tmpObj = useMemo(() => new THREE.Object3D(), []);
@@ -1788,6 +1796,13 @@ function AttributeNodes({ attributes, focused, layout, onSelect, onHover, sizeMu
         ref={meshRef}
         args={[undefined, undefined, attributes.length]}
         onClick={e => { e.stopPropagation(); if (e.instanceId != null) onSelect(attributes[e.instanceId]); }}
+        onContextMenu={e => {
+          e.stopPropagation();
+          if (e.instanceId != null) {
+            const a = attributes[e.instanceId];
+            onCopy?.(a.label || a.name);
+          }
+        }}
         onPointerOver={e => { e.stopPropagation(); if (e.instanceId != null) onHover(attributes[e.instanceId]); }}
         onPointerOut={e => { e.stopPropagation(); onHover(null); }}
       >
@@ -3150,6 +3165,26 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
   // which meant user input fought the lerp for the full animation
   // duration before it would settle.
   const cameraAnimatingRef = useRef(false);
+
+  // Right-click-to-copy: writes the clicked node's name to the system
+  // clipboard and flashes a small toast so the user knows it worked.
+  // `t` is a timestamp used as a key so rapid successive copies don't
+  // cancel each other's toast with a stale clear-timer.
+  const [copyToast, setCopyToast] = useState(null);
+  const copyNodeName = (name) => {
+    if (!name) return;
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(name).catch(() => {});
+    }
+    setCopyToast({ text: name, t: Date.now() });
+  };
+  useEffect(() => {
+    if (!copyToast) return;
+    const timer = setTimeout(() => {
+      setCopyToast(curr => curr?.t === copyToast.t ? null : curr);
+    }, 1500);
+    return () => clearTimeout(timer);
+  }, [copyToast]);
   // Live-position map: smalls orbit around their parents via useFrame, so
   // their world-space position changes every frame. Anything that draws
   // geometry connecting TO a small (focus lines, ON-mode edges) needs to
@@ -3389,7 +3424,10 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
   };
 
   return (
-    <div style={{ position: "relative", width: "100%", height: "calc(100vh - 56px)", minHeight: 500, background: "radial-gradient(ellipse at center, #0A0A14 0%, #04040B 70%)", overflow: "hidden" }}>
+    <div
+      style={{ position: "relative", width: "100%", height: "calc(100vh - 56px)", minHeight: 500, background: "radial-gradient(ellipse at center, #0A0A14 0%, #04040B 70%)", overflow: "hidden" }}
+      onContextMenu={(e) => e.preventDefault()}
+    >
       <Canvas
         camera={{ position: [0, 15, 130], fov: 50, near: 0.1, far: 800 }}
         dpr={[1, 2]}
@@ -3407,22 +3445,22 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
           )}
 
           {layers.bigs && (
-            <BigNodes bigs={visibleBigs} focused={focused} layout={layout} onSelect={selectBig} onHover={setHovered}
+            <BigNodes bigs={visibleBigs} focused={focused} layout={layout} onSelect={selectBig} onHover={setHovered} onCopy={copyNodeName}
                       sizeMult={nodeSizes.big} showLabel={labelOpts.bigLabels} />
           )}
 
           {layers.mids && (
-            <MidNodes mids={visibleMids} focused={focused} layout={layout} onSelect={selectMid} onHover={setHovered}
+            <MidNodes mids={visibleMids} focused={focused} layout={layout} onSelect={selectMid} onHover={setHovered} onCopy={copyNodeName}
                       sizeMult={nodeSizes.mid} relatedMidSet={relatedMidSet} />
           )}
 
           {layout.hasSmalls && layers.mids && layers.smalls && (
-            <SmallNodes smalls={visibleSmalls} focused={focused} layout={layout} onSelect={selectSmall} onHover={setHovered}
+            <SmallNodes smalls={visibleSmalls} focused={focused} layout={layout} onSelect={selectSmall} onHover={setHovered} onCopy={copyNodeName}
                         sizeMult={nodeSizes.small} livePosRef={livePosRef} />
           )}
 
           {layout.hasAttrs && layers.attributes && (
-            <AttributeNodes attributes={visibleAttributes} focused={focused} layout={layout} onSelect={selectAttr} onHover={setHovered}
+            <AttributeNodes attributes={visibleAttributes} focused={focused} layout={layout} onSelect={selectAttr} onHover={setHovered} onCopy={copyNodeName}
                             sizeMult={nodeSizes.attr} relatedAttrSet={relatedAttrSet} />
           )}
 
@@ -3469,6 +3507,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
           rotateSpeed={0.55} zoomSpeed={0.9} panSpeed={0.6}
           autoRotate={autoRotate && !interacting} autoRotateSpeed={rotateSpeed}
           onStart={() => { cameraAnimatingRef.current = false; }}
+          mouseButtons={{ LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: null }}
         />
         <CameraRig focusTarget={focused} resetCount={resetCount} controlsRef={controlsRef} animatingRef={cameraAnimatingRef} />
       </Canvas>
@@ -3496,6 +3535,34 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
         onExitFocus={() => setFocused(null)}
       />
       <FocusHUD focused={focused} layout={layout} />
+      {copyToast && (
+        <div
+          key={copyToast.t}
+          style={{
+            position: "absolute", top: 58, left: "50%", transform: "translateX(-50%)",
+            background: "rgba(94,106,210,0.96)",
+            border: `1px solid ${T.accent}`,
+            color: "#fff", fontFamily: T.fontMono, fontSize: 12, fontWeight: 600,
+            letterSpacing: ".04em",
+            padding: "8px 14px", borderRadius: T.r_md,
+            boxShadow: "0 6px 24px rgba(94,106,210,0.5)",
+            zIndex: 30, whiteSpace: "nowrap", maxWidth: "70vw",
+            overflow: "hidden", textOverflow: "ellipsis",
+            pointerEvents: "none",
+            animation: "hi-copytoast 1500ms ease-out forwards",
+          }}
+        >
+          ✓ copied&nbsp;&nbsp;<span style={{ fontWeight: 500, opacity: 0.92 }}>"{copyToast.text}"</span>
+          <style>{`
+            @keyframes hi-copytoast {
+              0%   { opacity: 0; transform: translate(-50%, -6px); }
+              12%  { opacity: 1; transform: translate(-50%, 0); }
+              78%  { opacity: 1; transform: translate(-50%, 0); }
+              100% { opacity: 0; transform: translate(-50%, -3px); }
+            }
+          `}</style>
+        </div>
+      )}
     </div>
   );
 }
