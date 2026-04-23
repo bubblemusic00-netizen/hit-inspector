@@ -695,6 +695,9 @@ function TreeDetail({ category, data, selected, raw }) {
       { key: "vocalists",          label: "VOCALIST" },
       { key: "lyricalVibes",       label: "LYRICAL VIBE" },
       { key: "instrumentKeywords", label: "INSTRUMENT KEYWORDS" },
+      { key: "genres",             label: "RELATED GENRES" },
+      { key: "subs",               label: "RELATED SUB-GENRES" },
+      { key: "micros",             label: "RELATED MICRO-STYLES" },
     ];
     const bpm = Array.isArray(resolved.bpmRange) && resolved.bpmRange.length === 2
       ? resolved.bpmRange
