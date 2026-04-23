@@ -3720,26 +3720,45 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
     setSearch("");
     const n = item.node;
 
+    // Collect attributes related to the picked node so we can narrow the
+    // attribute filter too. Without this, picking a genre correctly hid
+    // unrelated bigs/mids/smalls but left all 224 attribute stars still
+    // glowing around the map — the "unrelated lit stars" the user
+    // reported.
+    const relatedAttrs = new Set();
+    const pushRel = (r) => { if (r?.node) relatedAttrs.add(attrKey(r.node)); };
+    if (item.kind === "big") {
+      if (layout.bigAttrEdges) (layout.bigAttrEdges(n) || []).forEach(pushRel);
+      if (layout.midToAttrs) {
+        for (const m of layout.mids) {
+          if (m.parent === n.name) (layout.midToAttrs(m) || []).forEach(pushRel);
+        }
+      }
+    } else if (item.kind === "mid") {
+      if (layout.midToAttrs) (layout.midToAttrs(n) || []).forEach(pushRel);
+    } else if (item.kind === "small") {
+      const parent =
+        layout.midsByKey?.[n.parent + "/" + n.grandparent] ||
+        layout.mids.find(m => m.name === n.parent && m.parent === n.grandparent);
+      if (parent && layout.midToAttrs) (layout.midToAttrs(parent) || []).forEach(pushRel);
+    }
+
     // Always rewire filters to the picked item + its subtree. Previously
     // we only did this when the user hadn't customized anything yet —
     // which meant the first pick narrowed correctly, but a SECOND pick
     // (now that filters are no longer empty) just moved the focus
-    // highlight while the old subtree stayed on screen. That was the
-    // "turns off everything from the same category" confusion in the
-    // user report: picking "Rock" after first picking "Hip-Hop" left
-    // Hip-Hop's subtree visible and Rock invisible (because Rock wasn't
-    // in filter.bigs), so the UI looked broken.
-    //
-    // We also explicitly clear downstream filters so stale levels from
-    // a previous narrow don't linger. Example: first pick narrowed mids
-    // to { Afro Drill }. User then picks Hip-Hop (a big). Without the
-    // `mids: null` clear, visibleMids would stay filtered to Afro Drill
-    // even though the user picked a broader scope.
+    // highlight while the old subtree stayed on screen. We also clear
+    // downstream filters so stale levels from a previous narrow don't
+    // linger (e.g. first pick narrowed mids to {Afro Drill}; user then
+    // picks Hip-Hop — without `mids: null`, visibleMids would stay
+    // pinned to Afro Drill under the broader scope).
     if (item.kind === "big") {
       setFilters(f => ({
         ...f,
         bigs: new Set([n.name]),
         mids: null, smalls: null,
+        attrCats: null,
+        attrs: relatedAttrs,
       }));
     } else if (item.kind === "mid") {
       setFilters(f => ({
@@ -3747,6 +3766,8 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
         bigs: new Set([n.parent]),
         mids: new Set([n.name]),
         smalls: null,
+        attrCats: null,
+        attrs: relatedAttrs,
       }));
     } else if (item.kind === "small") {
       setFilters(f => ({
@@ -3754,10 +3775,12 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
         bigs:   new Set([n.grandparent]),
         mids:   new Set([n.parent]),
         smalls: new Set([smallKey(n)]),
+        attrCats: null,
+        attrs: relatedAttrs,
       }));
     } else {
-      // Attribute: narrow attrCats + attrs to that attribute only. We
-      // don't touch bigs/mids/smalls because attributes cross-cut the
+      // Attribute pick: narrow attrCats + attrs to just that attribute.
+      // We don't touch bigs/mids/smalls because attributes cross-cut the
       // genre tree — the focus highlight will light up what connects.
       setFilters(f => ({
         ...f,
@@ -3788,7 +3811,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
 
   return (
     <div
-      style={{ position: "relative", width: "100%", height: "calc(100vh - 56px)", minHeight: 500, background: "radial-gradient(ellipse at center, #0A0A14 0%, #04040B 70%)", overflow: "hidden" }}
+      style={{ position: "relative", width: "100%", height: "100dvh", minHeight: 500, background: "radial-gradient(ellipse at center, #0A0A14 0%, #04040B 70%)", overflow: "hidden" }}
       onContextMenu={(e) => e.preventDefault()}
     >
       <Canvas
