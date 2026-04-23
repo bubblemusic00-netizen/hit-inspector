@@ -233,14 +233,59 @@ function bandedBody(geom) {
   return g;
 }
 
-function makeNoteGeometry({ withRing = false, detail = "med" } = {}) {
+// Magma variant — wider HDR range (0.05 nearly-black → 1.70 pushing bloom)
+// combined with a stronger, three-octave noise for "convection cell" feel.
+// Used only on the 18 big genre nodes, where a shader hook modulates the
+// emissive by these same vertex colors so dark bands read as cooler crust
+// and the bright seams blaze like magma pouring through. The result: you
+// can actually see the curvature and surface structure, instead of a flat
+// colored ball (which was the user's complaint with the previous material).
+function bandedBodyMagma(geom) {
+  const g = geom.index ? geom.toNonIndexed() : geom.clone();
+  const pos = g.getAttribute("position");
+  const n = pos.count;
+  const colors = new Float32Array(n * 3);
+  const stops = [
+    0.05, 0.09, 0.16, 0.12,   // crust (south): near-black
+    0.34, 0.20, 0.50, 0.28,   // cooling zone (lower mid)
+    0.95, 1.70, 1.30, 1.55,   // MAGMA belt — HDR hot seams
+    0.80, 1.05, 0.48, 0.20,   // crust (north fade)
+  ];
+  const nStops = stops.length - 1;
+  for (let i = 0; i < n; i++) {
+    const y = pos.getY(i);
+    const x = pos.getX(i);
+    const z = pos.getZ(i);
+    const lat = (y + 1) * 0.5;
+    // Three-octave wave: big warp + medium wobble + fine grain. The fine
+    // grain makes the bright bands look like turbulent plasma rather than
+    // smooth stripes.
+    const wave =
+      Math.sin(x * 3.2 + z * 2.6) * 0.075 +
+      Math.cos(x * 6.2 - z * 4.8) * 0.030 +
+      Math.sin(x * 11.5 + z * 9.0) * 0.012;
+    const t = Math.max(0, Math.min(0.9999, lat + wave));
+    const p = t * nStops;
+    const i0 = Math.floor(p);
+    const i1 = Math.min(i0 + 1, nStops);
+    const f = p - i0;
+    const tint = stops[i0] * (1 - f) + stops[i1] * f;
+    colors[i*3] = tint; colors[i*3+1] = tint; colors[i*3+2] = tint;
+  }
+  g.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+  return g;
+}
+
+function makeNoteGeometry({ withRing = false, detail = "med", magma = false } = {}) {
   const parts = [];
   const segW = detail === "hi" ? 32 : 24;
   const segH = detail === "hi" ? 22 : 16;
 
-  // Body — the "planet" sphere, with 4-band lightness pattern.
+  // Body — the "planet" sphere. Magma bands for bigs (more extreme range
+  // so the shader-driven emissive modulation has material to work with);
+  // the standard atmospheric band for mids/smalls/attrs.
   const body = new THREE.SphereGeometry(1.0, segW, segH);
-  parts.push(bandedBody(body));
+  parts.push(magma ? bandedBodyMagma(body) : bandedBody(body));
 
   // Optional decorative ring (bigs only — too busy on dense tiers).
   if (withRing) {
@@ -289,9 +334,11 @@ function makeNoteGeometry({ withRing = false, detail = "med" } = {}) {
   return mergeGeos(parts);
 }
 
-// Hi-detail compound WITH the tilted ring — used only for the 18 big
-// genre nodes (cheap to render, big visual payoff).
-const BIG_NOTE_GEOM = makeNoteGeometry({ withRing: true, detail: "hi" });
+// Hi-detail compound WITH the tilted ring AND magma-range banding — used
+// only for the 18 big genre nodes. The magma body pairs with a shader
+// modulation on the material (see BigNoteNode) to make the sphere look
+// like a tiny sun instead of a flat colored ball.
+const BIG_NOTE_GEOM = makeNoteGeometry({ withRing: true, detail: "hi", magma: true });
 // Medium-detail compound WITHOUT the ring — used for every other tier
 // (mids / smalls / attrs), where we might be drawing 1500+ instances.
 const NOTE_GEOM     = makeNoteGeometry({ withRing: false, detail: "med" });
@@ -1336,6 +1383,41 @@ function BigNoteNode({ b, focused, sizeMult, showLabel, onSelect, onHover }) {
     (focused?.kind === "small" && focused.grandparent === b.name);
   const dim = focused && !isF && !related;
 
+  // Magma material — built once per big (color is per-genre). The shader
+  // hook multiplies emissive radiance by a function of vColor.r (the band
+  // tint we wrote into the geometry), so dark latitudes barely glow while
+  // the bright bands push hard into HDR. Without this, a high uniform
+  // emissiveIntensity washes the banding flat (which was the complaint).
+  const material = useMemo(() => {
+    const m = new THREE.MeshStandardMaterial({
+      color: b.color,
+      emissive: b.color,
+      emissiveIntensity: 1.0,
+      metalness: 0.35,
+      roughness: 0.42,
+      vertexColors: true,
+      toneMapped: false,
+    });
+    m.onBeforeCompile = (shader) => {
+      shader.fragmentShader = shader.fragmentShader.replace(
+        '#include <emissivemap_fragment>',
+        `#include <emissivemap_fragment>
+         totalEmissiveRadiance *= (0.22 + vColor.r * 1.35);`
+      );
+    };
+    return m;
+  }, [b.color]);
+
+  // Keep emissiveIntensity reactive to focus/dim state without rebuilding
+  // the material (which would re-compile the shader).
+  useEffect(() => {
+    material.emissiveIntensity = isF ? 1.8 : (dim ? 0.35 : 1.0);
+  }, [material, isF, dim]);
+
+  // Dispose the per-node material when the component unmounts (category
+  // switch, filter rebuild, etc). Geometry is shared and never disposed.
+  useEffect(() => () => { material.dispose(); }, [material]);
+
   return (
     <group position={b.pos} scale={sizeMult * BIG_R * BIG_MULT}>
       <group ref={spinRef} rotation={[0, sp.phase, 0]}>
@@ -1345,13 +1427,7 @@ function BigNoteNode({ b, focused, sizeMult, showLabel, onSelect, onHover }) {
           onPointerOut={e => { e.stopPropagation(); onHover(null); }}
         >
           <primitive object={BIG_NOTE_GEOM} attach="geometry" />
-          <meshStandardMaterial
-            color={b.color} emissive={b.color}
-            emissiveIntensity={isF ? 2.4 : (dim ? 0.45 : 1.1)}
-            metalness={0.6} roughness={0.25}
-            vertexColors
-            toneMapped={false}
-          />
+          <primitive object={material} attach="material" />
         </mesh>
         {/* Glow — camera-facing billboard with gradient texture,
             creates a soft bloom-like halo. */}
@@ -2008,14 +2084,23 @@ function HoverTooltip({ hovered }) {
   );
 }
 
-function CameraRig({ focusTarget, resetCount, controlsRef }) {
+// CameraRig: smooth fly-to-focus animation using lerp. The `animating`
+// flag is exposed via a prop ref so OrbitControls' onStart can cancel
+// the animation the moment the user grabs the camera (drag or wheel-
+// zoom). Without this cancel, the lerp pulls camera + target back each
+// frame while the user's input is fighting to move them — producing
+// the "stuck, snaps back, works again after a few seconds" symptom.
+function CameraRig({ focusTarget, resetCount, controlsRef, animatingRef }) {
   const { camera } = useThree();
-  const animating = useRef(false);
   const destPos = useRef(new THREE.Vector3(0, 15, 130));
   const destTgt = useRef(new THREE.Vector3());
 
+  // Helper: flip animatingRef without crashing if the caller forgot to
+  // wire it up (defensive; keeps the component usable in isolation).
+  const setAnimating = (v) => { if (animatingRef) animatingRef.current = v; };
+
   useEffect(() => {
-    if (!focusTarget) { animating.current = false; return; }
+    if (!focusTarget) { setAnimating(false); return; }
     const p = focusTarget.pos;
     if (!p) return;
     const t = new THREE.Vector3(...p);
@@ -2023,7 +2108,7 @@ function CameraRig({ focusTarget, resetCount, controlsRef }) {
     const dist = focusTarget.kind === "big" ? 12 : focusTarget.kind === "mid" ? 5 : focusTarget.kind === "small" ? 2.5 : 5;
     const dir = t.length() > 0.01 ? t.clone().normalize() : new THREE.Vector3(0, 0, 1);
     destPos.current.copy(t.clone().add(dir.multiplyScalar(dist)));
-    animating.current = true;
+    setAnimating(true);
   }, [focusTarget]);
 
   // Reset: fly back to the default viewing position.
@@ -2031,11 +2116,11 @@ function CameraRig({ focusTarget, resetCount, controlsRef }) {
     if (!resetCount) return;
     destPos.current.set(0, 15, 130);
     destTgt.current.set(0, 0, 0);
-    animating.current = true;
+    setAnimating(true);
   }, [resetCount]);
 
   useFrame((_, dt) => {
-    if (!animating.current) return;
+    if (!animatingRef?.current) return;
     const k = Math.min(1, dt * 2.8);
     camera.position.lerp(destPos.current, k);
     if (controlsRef.current) {
@@ -2043,7 +2128,7 @@ function CameraRig({ focusTarget, resetCount, controlsRef }) {
       controlsRef.current.update();
     }
     if (camera.position.distanceTo(destPos.current) < 0.07 && controlsRef.current?.target.distanceTo(destTgt.current) < 0.07)
-      animating.current = false;
+      animatingRef.current = false;
   });
   return null;
 }
@@ -3058,6 +3143,13 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
 
   const controlsRef = useRef();
   const interactionTimer = useRef(null);
+  // Shared flag so OrbitControls' onStart (drag / wheel-zoom) can cancel
+  // the CameraRig's fly-to-focus lerp. Writing `false` here is sufficient
+  // — CameraRig's useFrame checks this every frame and bails out when
+  // false. Previously `animating` was a private ref inside CameraRig,
+  // which meant user input fought the lerp for the full animation
+  // duration before it would settle.
+  const cameraAnimatingRef = useRef(false);
   // Live-position map: smalls orbit around their parents via useFrame, so
   // their world-space position changes every frame. Anything that draws
   // geometry connecting TO a small (focus lines, ON-mode edges) needs to
@@ -3198,8 +3290,32 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
         });
       }
     }
+    // Mid → attribute edges. Without these, attribute nodes (moods,
+    // grooves, instruments like "Amapiano log drum") had no visible
+    // connections in ON mode, even though the data is there and focus
+    // mode rendered them correctly. Cap at 3 attrs per mid so the edge
+    // count stays manageable — a typical genre view goes from ~1300
+    // edges to ~2000, still one draw call thanks to LineSegments2
+    // batching. Only draw when the attribute tier is also visible.
+    if (layout.hasAttrs && layers.attributes && layout.midToAttrs && visibleAttributes?.length) {
+      const visibleAttrKeys = new Set(visibleAttributes.map(a => `${a.categoryId}:${a.name}`));
+      for (const m of visibleMids) {
+        const attrs = layout.midToAttrs(m) || [];
+        let added = 0;
+        for (const { node, cat } of attrs) {
+          if (added >= 3) break;
+          if (!node?.pos) continue;
+          if (!visibleAttrKeys.has(`${node.categoryId}:${node.name}`)) continue;
+          out.push({
+            from: m.pos, to: node.pos, color: (cat?.color) || node.color,
+            fromNode: { ...m, kind: "mid" }, toNode: { ...node, kind: "attribute" },
+          });
+          added++;
+        }
+      }
+    }
     return out;
-  }, [visibleMids, visibleSmalls, layout, layers.smalls, layers.mids, filters.bigs]);
+  }, [visibleMids, visibleSmalls, visibleAttributes, layout, layers.smalls, layers.mids, layers.attributes, filters.bigs]);
 
   const selectBig   = b => setFocused({ kind: "big",       name: b.name, pos: b.pos });
   const selectMid   = s => setFocused({ kind: "mid",       name: s.name, parent: s.parent, pos: s.pos });
@@ -3346,9 +3462,15 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
           <HoverTooltip hovered={hovered} />
         </Suspense>
 
-        <OrbitControls ref={controlsRef} enableDamping dampingFactor={0.07} minDistance={2} maxDistance={260} rotateSpeed={0.55} zoomSpeed={0.9} panSpeed={0.6}
-          autoRotate={autoRotate && !interacting} autoRotateSpeed={rotateSpeed} />
-        <CameraRig focusTarget={focused} resetCount={resetCount} controlsRef={controlsRef} />
+        <OrbitControls
+          ref={controlsRef}
+          enableDamping dampingFactor={0.07}
+          minDistance={2} maxDistance={260}
+          rotateSpeed={0.55} zoomSpeed={0.9} panSpeed={0.6}
+          autoRotate={autoRotate && !interacting} autoRotateSpeed={rotateSpeed}
+          onStart={() => { cameraAnimatingRef.current = false; }}
+        />
+        <CameraRig focusTarget={focused} resetCount={resetCount} controlsRef={controlsRef} animatingRef={cameraAnimatingRef} />
       </Canvas>
 
       <LayerPanel
