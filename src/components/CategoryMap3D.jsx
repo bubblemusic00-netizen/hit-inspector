@@ -348,18 +348,34 @@ const NOTE_GEOM     = makeNoteGeometry({ withRing: false, detail: "med" });
 // onBeforeCompile are fragile and can silently fail across devices.
 // The per-instance color still comes through via instance color ×
 // vertex tint, which gives each note a vivid, individualized look.
-function buildGlowyInstancedMaterial({ metalness = 0.4, roughness = 0.4, emissive = 0x444444 } = {}) {
+function buildGlowyInstancedMaterial({ metalness = 0.4, roughness = 0.4, emissive = 0x444444, emissiveIntensity = 0.55 } = {}) {
   return new THREE.MeshStandardMaterial({
     color: 0xffffff,
     vertexColors: true,
     metalness, roughness,
     emissive,
-    emissiveIntensity: 0.55,
+    emissiveIntensity,
     toneMapped: false,
   });
 }
 
-const MAT_MID   = buildGlowyInstancedMaterial({ metalness: 0.42, roughness: 0.38, emissive: 0x4a4a4a });
+// Subgenre (mid) material gets a brighter emissive than small/attr so
+// it sits higher in the visual hierarchy — but still dimmer than the
+// genre (big) magma nodes, which are literal suns with HDR banding.
+// To actually READ as mid-class luminosity we also mix the per-instance
+// vertex color into the fragment's emissive term via onBeforeCompile;
+// that way each subgenre glows in its family color (e.g. Hip-Hop mids
+// glow purple, Country mids glow yellow) rather than a uniform gray.
+// The multiplier (0.65) was picked so a saturated instance color adds
+// a visibly bright halo without clipping into the HDR range.
+const MAT_MID   = buildGlowyInstancedMaterial({ metalness: 0.42, roughness: 0.38, emissive: 0x4a4a4a, emissiveIntensity: 0.95 });
+MAT_MID.onBeforeCompile = (shader) => {
+  shader.fragmentShader = shader.fragmentShader.replace(
+    "#include <emissivemap_fragment>",
+    `#include <emissivemap_fragment>
+     totalEmissiveRadiance += vColor.rgb * 0.65;`
+  );
+};
 const MAT_SMALL = buildGlowyInstancedMaterial({ metalness: 0.38, roughness: 0.42, emissive: 0x3e3e3e });
 const MAT_ATTR  = buildGlowyInstancedMaterial({ metalness: 0.38, roughness: 0.40, emissive: 0x484848 });
 
@@ -3257,6 +3273,46 @@ function LayerPanel({
   );
 }
 
+function FlightKeysHUD({ pressedKeys }) {
+  // Compact keypad showing the 6 flight keys, with active ones lit in
+  // the accent color. Doubles as a keyboard-hit diagnostic: if nothing
+  // lights up when you press W, the listener isn't catching events
+  // (Layout handler eating them, focus in an input, etc). If a key
+  // lights up but the camera doesn't move, the issue is in the nav
+  // component instead.
+  const active = new Set(pressedKeys.split(""));
+  const Key = ({ k, label }) => {
+    const on = active.has(k);
+    return (
+      <div style={{
+        width: 22, height: 22, borderRadius: 4,
+        display: "flex", alignItems: "center", justifyContent: "center",
+        fontSize: 10, fontFamily: T.fontMono, fontWeight: 600,
+        color: on ? "#fff" : T.textMuted,
+        background: on ? T.accent : "rgba(255,255,255,0.04)",
+        border: `1px solid ${on ? T.accent : "rgba(255,255,255,0.10)"}`,
+        transition: "background 80ms, color 80ms, border-color 80ms",
+      }}>{label || k.toUpperCase()}</div>
+    );
+  };
+  return (
+    <div style={{
+      position: "absolute", bottom: 52, left: 16, zIndex: 10,
+      display: "flex", alignItems: "center", gap: 10,
+      background: "rgba(10,10,15,0.65)", padding: "6px 8px",
+      borderRadius: T.r_sm, userSelect: "none", pointerEvents: "none",
+    }}>
+      <div style={{ display: "flex", gap: 3 }}>
+        <Key k="w" /><Key k="a" /><Key k="s" /><Key k="d" />
+      </div>
+      <div style={{ width: 1, height: 18, background: "rgba(255,255,255,0.08)" }} />
+      <div style={{ display: "flex", gap: 3 }}>
+        <Key k="z" /><Key k="x" />
+      </div>
+    </div>
+  );
+}
+
 function FocusHUD({ focused, layout }) {
   if (!focused) return (
     <div style={{
@@ -3518,7 +3574,14 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
   // instead of "w" and broke flight entirely. We ignore key events
   // originating in inputs / textareas / contenteditable regions so
   // typing into the search or filter boxes doesn't drift the camera.
+  //
+  // A parallel React-state mirror (`pressedKeys`) drives the tiny
+  // on-screen controls legend. Without this mirror the overlay can't
+  // know the ref changed (React doesn't observe refs). Keeping them
+  // paired lets the ref stay the per-frame read source and the state
+  // drive the visual feedback.
   const keyboardMoveRef = useRef(new Set());
+  const [pressedKeys, setPressedKeys] = useState("");
   useEffect(() => {
     const CODE_TO_KEY = {
       KeyW: "w", KeyA: "a", KeyS: "s", KeyD: "d", KeyX: "x", KeyZ: "z",
@@ -3528,27 +3591,47 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
       const tag = (t.tagName || "").toLowerCase();
       return tag === "input" || tag === "textarea" || t.isContentEditable;
     };
+    const syncState = () => {
+      setPressedKeys([...keyboardMoveRef.current].sort().join(""));
+    };
     const onKeyDown = (e) => {
       if (isTextTarget(e.target)) return;
       const mapped = CODE_TO_KEY[e.code];
       if (!mapped) return;
+      const before = keyboardMoveRef.current.size;
       keyboardMoveRef.current.add(mapped);
+      if (keyboardMoveRef.current.size !== before) syncState();
       e.preventDefault();
     };
     const onKeyUp = (e) => {
       const mapped = CODE_TO_KEY[e.code];
       if (mapped && keyboardMoveRef.current.has(mapped)) {
         keyboardMoveRef.current.delete(mapped);
+        syncState();
       }
     };
-    const onBlur = () => keyboardMoveRef.current.clear();
-    window.addEventListener("keydown", onKeyDown);
-    window.addEventListener("keyup", onKeyUp);
+    const onBlur = () => {
+      if (keyboardMoveRef.current.size > 0) {
+        keyboardMoveRef.current.clear();
+        syncState();
+      }
+    };
+    // Capture-phase + both window and document so any upstream handler
+    // that stopPropagation()s on a bubble-phase listener can't starve
+    // us. Belt and suspenders after the user reported that keys weren't
+    // registering at all.
+    const opts = { capture: true };
+    window.addEventListener("keydown", onKeyDown, opts);
+    window.addEventListener("keyup", onKeyUp, opts);
     window.addEventListener("blur", onBlur);
+    document.addEventListener("keydown", onKeyDown, opts);
+    document.addEventListener("keyup", onKeyUp, opts);
     return () => {
-      window.removeEventListener("keydown", onKeyDown);
-      window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("keydown", onKeyDown, opts);
+      window.removeEventListener("keyup", onKeyUp, opts);
       window.removeEventListener("blur", onBlur);
+      document.removeEventListener("keydown", onKeyDown, opts);
+      document.removeEventListener("keyup", onKeyUp, opts);
     };
   }, []);
 
@@ -4295,6 +4378,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
         onExitFocus={() => setFocused(null)}
       />
       <FocusHUD focused={focused} layout={layout} />
+      <FlightKeysHUD pressedKeys={pressedKeys} />
       {copyToast && (
         <div
           key={copyToast.t}
