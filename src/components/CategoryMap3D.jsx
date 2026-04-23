@@ -1492,7 +1492,7 @@ function MidNodes({ mids, focused, layout, onSelect, onHover, sizeMult = 1, rela
         <primitive object={NOTE_GEOM} attach="geometry" />
         <primitive object={MAT_MID} attach="material" />
       </instancedMesh>
-      <points ref={glowRef} raycast={() => null} key={`glow-${mids?.length ?? smalls?.length ?? attributes?.length}`}>
+      <points ref={glowRef} raycast={() => null} key={`glow-mid-${mids.length}`}>
         <bufferGeometry>
           <bufferAttribute attach="attributes-position" args={[glowPos, 3]} />
           <bufferAttribute attach="attributes-color" args={[glowCol, 3]} />
@@ -1618,7 +1618,7 @@ function SmallNodes({ smalls, focused, onSelect, onHover, sizeMult = 1, layout }
         <primitive object={NOTE_GEOM} attach="geometry" />
         <primitive object={MAT_SMALL} attach="material" />
       </instancedMesh>
-      <points ref={glowRef} raycast={() => null} key={`glow-${mids?.length ?? smalls?.length ?? attributes?.length}`}>
+      <points ref={glowRef} raycast={() => null} key={`glow-small-${smalls.length}`}>
         <bufferGeometry>
           <bufferAttribute attach="attributes-position" args={[glowPos, 3]} />
           <bufferAttribute attach="attributes-color" args={[glowCol, 3]} />
@@ -1710,7 +1710,7 @@ function AttributeNodes({ attributes, focused, layout, onSelect, onHover, sizeMu
         <primitive object={NOTE_GEOM} attach="geometry" />
         <primitive object={MAT_ATTR} attach="material" />
       </instancedMesh>
-      <points ref={glowRef} raycast={() => null} key={`glow-${mids?.length ?? smalls?.length ?? attributes?.length}`}>
+      <points ref={glowRef} raycast={() => null} key={`glow-attr-${attributes.length}`}>
         <bufferGeometry>
           <bufferAttribute attach="attributes-position" args={[glowPos, 3]} />
           <bufferAttribute attach="attributes-color" args={[glowCol, 3]} />
