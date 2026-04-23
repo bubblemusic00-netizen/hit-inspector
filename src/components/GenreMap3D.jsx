@@ -5,25 +5,25 @@ import * as THREE from "three";
 import { T } from "../theme.js";
 
 /* ═══════════════════════════════════════════════════════════════════
- * GenreMap3D — v2
+ * GenreMap3D — v3
  *
- * Three regions:
- *   1. Genre galaxy (radius 32): 18 genre suns, 294 subgenre planets,
- *      1180 microstyle moons.
- *   2. Attribute cloud (radius ~56): 8 category clusters — moods,
- *      energies, harmonics, textures, mix chars, grooves, vocalists,
- *      lyrical vibes.
- *   3. Link system:
- *      • Ancestry   — parent→child chain when a node is focused
- *      • Similarity — GENRE_INTUITION cross-ref lines between related
- *                     subgenres (pre-computed, one BufferGeometry draw call)
- *      • Attribute  — focused subgenre → its attribute nodes
+ * Key changes from v2:
+ *  • Force-directed genre positions — computed from GENRE_INTUITION
+ *    Jaccard similarity. Similar genres cluster together naturally.
+ *    Hip-Hop/Electronic/Pop form one hub; Classical/Soundtrack another;
+ *    Blues/Country/R&B a third.
+ *  • Genre similarity network is the PRIMARY visual — lines between
+ *    genres are the story, not decoration.
+ *  • Similarity threshold slider — filter weak connections.
+ *  • Focus HUD shows similarity scores ("Similar to: R&B 64%, Latin 62%")
+ *  • Cross-genre subgenre links shown on subgenre focus.
+ *  • Genre sun size proportional to subgenre count.
+ *  • Cleaner defaults — subgenres and attribute cloud OFF until toggled.
  *
- * Props:
- *   data — raw.data from data.json
+ * Props: data — raw.data from data.json
  * ═══════════════════════════════════════════════════════════════════ */
 
-// ── Decorative genre palette ────────────────────────────────────────
+// ── Decorative palette ──────────────────────────────────────────────
 const GENRE_COLORS = {
   "Hip-Hop":                "#A78BFA",
   "R&B / Soul":             "#FB7185",
@@ -47,7 +47,6 @@ const GENRE_COLORS = {
 const DEFAULT_COLOR = "#94A3B8";
 
 // ── Attribute category config ───────────────────────────────────────
-// giField = field name in GENRE_INTUITION for this category (null = not in GI)
 const ATTR_CATS = [
   { id: "moods",     label: "Moods",        color: "#F9A8D4", dataKey: "MOODS",           giField: "moods",     isObjects: false },
   { id: "energies",  label: "Energies",      color: "#FCD34D", dataKey: "ENERGIES",        giField: "energies",  isObjects: false },
@@ -58,67 +57,132 @@ const ATTR_CATS = [
   { id: "vocalists", label: "Vocalists",     color: "#A78BFA", dataKey: "VOCALISTS",       giField: null,        isObjects: false },
   { id: "lyrical",   label: "Lyrical vibes", color: "#6EE7B7", dataKey: "LYRICAL_VIBES",   giField: null,        isObjects: false },
 ];
-
 const GI_SIM_FIELDS = ["moods", "harmonics", "textures", "energies", "grooves"];
 
 // ── Geometry constants ──────────────────────────────────────────────
-const SUN_RADIUS     = 0.95;
-const PLANET_RADIUS  = 0.30;
-const MOON_RADIUS    = 0.10;
-const ATTR_RADIUS    = 0.18;
-const SYSTEM_R       = 32;
-const SUB_ORBIT      = 3.4;
-const MICRO_ORBIT    = 0.95;
-const ATTR_SHELL_R   = 56;
-const ATTR_CLUSTER_R = 4.5;
+const SYSTEM_R     = 32;
+const SUB_ORBIT    = 3.4;
+const MICRO_ORBIT  = 0.95;
+const PLANET_R     = 0.28;
+const MOON_R       = 0.10;
+const ATTR_R       = 0.18;
+const ATTR_SHELL_R = 58;
+const ATTR_CL_R    = 4.5;
+const SUN_R_BASE   = 0.6;   // min sun radius
+const SUN_R_MAX    = 1.3;   // max sun radius (for largest genre)
 
 // ── Layout math ─────────────────────────────────────────────────────
-
 function fibSphere(n) {
-  const pts = [];
-  if (n <= 0) return pts;
+  if (n <= 0) return [];
   if (n === 1) return [[0, 0, 1]];
-  const phi = Math.PI * (Math.sqrt(5) - 1);
+  const pts = [], phi = Math.PI * (Math.sqrt(5) - 1);
   for (let i = 0; i < n; i++) {
-    const y = 1 - (i / (n - 1)) * 2;
-    const r = Math.sqrt(Math.max(0, 1 - y * y));
-    const theta = phi * i;
-    pts.push([Math.cos(theta) * r, y, Math.sin(theta) * r]);
+    const y = 1 - (i / (n - 1)) * 2, r = Math.sqrt(Math.max(0, 1 - y * y)), t = phi * i;
+    pts.push([Math.cos(t) * r, y, Math.sin(t) * r]);
   }
   return pts;
 }
-
 function hash01(str) {
   let h = 2166136261 >>> 0;
-  for (let i = 0; i < str.length; i++) {
-    h ^= str.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
+  for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
   return (h >>> 0) / 0xFFFFFFFF;
 }
 
-// ── Main layout builder ─────────────────────────────────────────────
+// ── Genre similarity (Jaccard from GENRE_INTUITION) ─────────────────
+function computeGenreSimilarity(tree, genreIntuition) {
+  const gNames = Object.keys(tree);
+  const attrSets = {};
+  gNames.forEach(gName => {
+    const s = new Set();
+    Object.keys(tree[gName]).forEach(sName => {
+      const gi = genreIntuition[sName] || genreIntuition[sName.toLowerCase()];
+      if (!gi) return;
+      GI_SIM_FIELDS.forEach(f => (gi[f] || []).forEach(v => s.add(f + ":" + v)));
+    });
+    attrSets[gName] = s;
+  });
+  const matrix = {};
+  gNames.forEach(a => {
+    matrix[a] = {};
+    gNames.forEach(b => {
+      if (a === b) { matrix[a][b] = 1; return; }
+      const A = attrSets[a], B = attrSets[b];
+      let inter = 0;
+      for (const v of A) if (B.has(v)) inter++;
+      const union = A.size + B.size - inter;
+      matrix[a][b] = union > 0 ? inter / union : 0;
+    });
+  });
+  return matrix;
+}
 
+// ── Force-directed 3D layout for genres ────────────────────────────
+// Genres with high similarity attract, low similarity repel.
+// All genres constrained to a sphere of radius SYSTEM_R.
+function forceLayout3D(gNames, simMatrix, iterations = 180) {
+  const n = gNames.length;
+  const pts = fibSphere(n);
+  const pos = pts.map(p => ({ x: p[0] * SYSTEM_R, y: p[1] * SYSTEM_R, z: p[2] * SYSTEM_R }));
+
+  for (let iter = 0; iter < iterations; iter++) {
+    const forces = pos.map(() => ({ x: 0, y: 0, z: 0 }));
+    const damping = 0.6 * Math.pow(0.975, iter);
+
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        const sim = simMatrix[gNames[i]][gNames[j]];
+        const dx = pos[j].x - pos[i].x;
+        const dy = pos[j].y - pos[i].y;
+        const dz = pos[j].z - pos[i].z;
+        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz) + 0.01;
+        const nx = dx / dist, ny = dy / dist, nz = dz / dist;
+        // Ideal distance: similar genres → closer; different → farther
+        const idealDist = SYSTEM_R * (1.8 - sim * 1.2);
+        const f = (dist - idealDist) * 0.025 * damping;
+        forces[i].x += nx * f; forces[i].y += ny * f; forces[i].z += nz * f;
+        forces[j].x -= nx * f; forces[j].y -= ny * f; forces[j].z -= nz * f;
+      }
+    }
+
+    for (let i = 0; i < n; i++) {
+      pos[i].x += forces[i].x; pos[i].y += forces[i].y; pos[i].z += forces[i].z;
+      const len = Math.sqrt(pos[i].x ** 2 + pos[i].y ** 2 + pos[i].z ** 2) || 1;
+      pos[i].x = pos[i].x / len * SYSTEM_R;
+      pos[i].y = pos[i].y / len * SYSTEM_R;
+      pos[i].z = pos[i].z / len * SYSTEM_R;
+    }
+  }
+  return pos.map(p => [p.x, p.y, p.z]);
+}
+
+// ── Main layout builder ─────────────────────────────────────────────
 function buildLayout(data) {
-  const tree           = data.GENRE_TREE || {};
+  const tree           = data.GENRE_TREE     || {};
   const genreIntuition = data.GENRE_INTUITION || {};
 
-  // 1. Genre galaxy
-  const genreNames  = Object.keys(tree);
-  const genrePoints = fibSphere(genreNames.length);
-  const genres = [], subgenres = [], microstyles = [];
+  const gNames    = Object.keys(tree);
+  const simMatrix = computeGenreSimilarity(tree, genreIntuition);
+  const genrePositions = forceLayout3D(gNames, simMatrix);
 
-  genreNames.forEach((gName, gi) => {
-    const center = new THREE.Vector3(...genrePoints[gi]).multiplyScalar(SYSTEM_R);
+  const genres    = [];
+  const subgenres = [];
+  const microstyles = [];
+
+  const maxSubs = Math.max(...gNames.map(g => Object.keys(tree[g]).length));
+
+  gNames.forEach((gName, gi) => {
+    const center = new THREE.Vector3(...genrePositions[gi]);
     const color  = GENRE_COLORS[gName] || DEFAULT_COLOR;
     const seed   = hash01(gName);
     const qRot   = new THREE.Quaternion().setFromAxisAngle(
       new THREE.Vector3(Math.cos(seed * Math.PI * 2), Math.sin(seed * Math.PI * 2), Math.cos(seed * Math.PI * 4)).normalize(),
       seed * Math.PI * 2
     );
+    const subs      = Object.keys(tree[gName] || {});
+    const subCount  = subs.length;
+    const sunRadius = SUN_R_BASE + (SUN_R_MAX - SUN_R_BASE) * (subCount / maxSubs);
 
-    const subs = Object.keys(tree[gName] || {});
-    fibSphere(subs.length).forEach((sp, si) => {
+    fibSphere(subCount).forEach((sp, si) => {
       const subPos = center.clone().add(
         new THREE.Vector3(...sp).applyQuaternion(qRot).multiplyScalar(SUB_ORBIT)
       );
@@ -128,76 +192,55 @@ function buildLayout(data) {
         new THREE.Vector3(Math.sin(sSeed * Math.PI * 2), Math.cos(sSeed * Math.PI * 2), Math.sin(sSeed * Math.PI * 3.7)).normalize(),
         sSeed * Math.PI * 2
       );
-
       const microNames = tree[gName][sName] || [];
       const microEntries = [];
       fibSphere(microNames.length).forEach((mp, mi) => {
         const mPos = subPos.clone().add(
           new THREE.Vector3(...mp).applyQuaternion(sRot).multiplyScalar(MICRO_ORBIT)
         );
-        const entry = {
-          name: microNames[mi], parent: sName, grandparent: gName, color,
-          position: [mPos.x, mPos.y, mPos.z],
-        };
+        const entry = { name: microNames[mi], parent: sName, grandparent: gName, color, position: [mPos.x, mPos.y, mPos.z] };
         microEntries.push(entry);
         microstyles.push(entry);
       });
-
-      const sub = {
-        name: sName, parent: gName, color,
-        position: [subPos.x, subPos.y, subPos.z],
-        microstyles: microEntries,
-      };
+      const sub = { name: sName, parent: gName, color, position: [subPos.x, subPos.y, subPos.z], microstyles: microEntries };
       subgenres.push(sub);
-      genres[genres.length - 1]?.subgenres.push(sub); // safe push once genre is added
     });
 
     genres.push({
-      name: gName, color, position: [center.x, center.y, center.z], subgenres: [],
+      name: gName, color, position: [center.x, center.y, center.z],
+      subCount, sunRadius,
+      // Top-5 similar genres with scores (for focus HUD)
+      topSimilar: gNames
+        .filter(b => b !== gName)
+        .map(b => ({ name: b, score: simMatrix[gName][b] }))
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 5),
     });
-    // Backfill subgenres added in the loop above
-    const added = subgenres.slice(subgenres.length - subs.length);
-    genres[genres.length - 1].subgenres = added;
   });
 
-  // 2. Attribute cloud — 8 clusters on outer sphere
+  // Attribute cloud — 8 clusters on outer sphere
   const clusterPoles = fibSphere(ATTR_CATS.length);
   const attributeNodes = [], attributeClusters = [];
-
   ATTR_CATS.forEach((cat, ci) => {
-    const poleDir = new THREE.Vector3(...clusterPoles[ci]).normalize();
-    const poleCtr = poleDir.clone().multiplyScalar(ATTR_SHELL_R);
-    const rawItems = data[cat.dataKey] || [];
-    const items = rawItems.map(item =>
-      cat.isObjects ? { name: item[cat.nameKey], label: item[cat.labelKey] }
-                    : { name: item, label: item }
+    const poleCtr = new THREE.Vector3(...clusterPoles[ci]).normalize().multiplyScalar(ATTR_SHELL_R);
+    const items   = (data[cat.dataKey] || []).map(item =>
+      cat.isObjects ? { name: item[cat.nameKey], label: item[cat.labelKey] } : { name: item, label: item }
     );
     const catSeed = hash01(cat.id);
     const catRot  = new THREE.Quaternion().setFromAxisAngle(
       new THREE.Vector3(Math.cos(catSeed * Math.PI * 2), Math.sin(catSeed * Math.PI * 2), Math.cos(catSeed * Math.PI * 5)).normalize(),
       catSeed * Math.PI * 2
     );
-    const clusterNodes = fibSphere(items.length).map((lp, idx) => {
-      const pos = poleCtr.clone().add(
-        new THREE.Vector3(...lp).applyQuaternion(catRot).multiplyScalar(ATTR_CLUSTER_R)
-      );
-      const node = {
-        name: items[idx].name, label: items[idx].label,
-        categoryId: cat.id, color: cat.color,
-        poleCenter: [poleCtr.x, poleCtr.y, poleCtr.z],
-        position: [pos.x, pos.y, pos.z],
-      };
+    const clNodes = fibSphere(items.length).map((lp, idx) => {
+      const pos = poleCtr.clone().add(new THREE.Vector3(...lp).applyQuaternion(catRot).multiplyScalar(ATTR_CL_R));
+      const node = { name: items[idx].name, label: items[idx].label, categoryId: cat.id, color: cat.color, poleCenter: [poleCtr.x, poleCtr.y, poleCtr.z], position: [pos.x, pos.y, pos.z] };
       attributeNodes.push(node);
       return node;
     });
-    attributeClusters.push({
-      id: cat.id, label: cat.label, color: cat.color,
-      poleCenter: [poleCtr.x, poleCtr.y, poleCtr.z],
-      nodes: clusterNodes,
-    });
+    attributeClusters.push({ id: cat.id, label: cat.label, color: cat.color, poleCenter: [poleCtr.x, poleCtr.y, poleCtr.z], nodes: clNodes });
   });
 
-  // 3. Reverse index: attribute → which subgenres have it
+  // Reverse index: attribute → subgenres that have it
   const attrToSubs = {};
   subgenres.forEach(sub => {
     const gi = genreIntuition[sub.name] || genreIntuition[sub.name.toLowerCase()];
@@ -212,40 +255,52 @@ function buildLayout(data) {
     });
   });
 
-  // 4. Subgenre similarity links (GENRE_INTUITION cross-reference)
-  const attrSetFor = subgenres.map(sub => {
-    const gi  = genreIntuition[sub.name] || genreIntuition[sub.name.toLowerCase()];
+  // Subgenre similarity links (GENRE_INTUITION cross-reference)
+  const subAttrSets = subgenres.map(sub => {
+    const gi = genreIntuition[sub.name] || genreIntuition[sub.name.toLowerCase()];
     const set = new Set();
     if (gi) GI_SIM_FIELDS.forEach(f => (gi[f] || []).forEach(v => set.add(f + ":" + v)));
     return { sub, set };
   });
-
-  const simLinks = [], addedSim = new Set();
-  for (let i = 0; i < attrSetFor.length; i++) {
-    const { sub: a, set: aSet } = attrSetFor[i];
-    const candidates = [];
-    for (let j = 0; j < attrSetFor.length; j++) {
+  const subSimLinks = [], addedSub = new Set();
+  for (let i = 0; i < subAttrSets.length; i++) {
+    const { sub: a, set: aSet } = subAttrSets[i];
+    const cands = [];
+    for (let j = 0; j < subAttrSets.length; j++) {
       if (i === j) continue;
-      const { sub: b, set: bSet } = attrSetFor[j];
+      const { sub: b, set: bSet } = subAttrSets[j];
       let shared = 0;
       for (const x of aSet) if (bSet.has(x)) shared++;
-      if (shared >= 3) candidates.push({ b, score: shared });
+      if (shared >= 3) cands.push({ b, score: shared });
     }
-    candidates.sort((x, y) => y.score - x.score);
-    for (const { b, score } of candidates.slice(0, 3)) {
+    cands.sort((x, y) => y.score - x.score);
+    for (const { b, score } of cands.slice(0, 3)) {
       const key = [a.name, b.name].sort().join("\0");
-      if (!addedSim.has(key)) {
-        addedSim.add(key);
-        simLinks.push({ from: a.position, to: b.position, score, sameFamily: a.parent === b.parent });
+      if (!addedSub.has(key)) {
+        addedSub.add(key);
+        subSimLinks.push({ from: a.position, to: b.position, score, crossFamily: a.parent !== b.parent, color: a.color });
       }
     }
   }
 
-  return { genres, subgenres, microstyles, attributeNodes, attributeClusters, attrToSubs, simLinks };
+  // Genre similarity link list (for rendering, filtered by threshold in component)
+  const genreSimLinks = [];
+  for (let i = 0; i < gNames.length; i++) {
+    for (let j = i + 1; j < gNames.length; j++) {
+      const score = simMatrix[gNames[i]][gNames[j]];
+      genreSimLinks.push({
+        from: genres[i].position, to: genres[j].position,
+        score, colorA: genres[i].color, colorB: genres[j].color,
+        nameA: gNames[i], nameB: gNames[j],
+      });
+    }
+  }
+  genreSimLinks.sort((a, b) => b.score - a.score);
+
+  return { genres, subgenres, microstyles, attributeNodes, attributeClusters, attrToSubs, subSimLinks, genreSimLinks, simMatrix };
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
-
 function getAttrLinks(focused, layout, genreIntuition) {
   if (!focused || focused.kind !== "subgenre") return [];
   const gi = genreIntuition[focused.name] || genreIntuition[focused.name.toLowerCase()];
@@ -255,7 +310,7 @@ function getAttrLinks(focused, layout, genreIntuition) {
     if (!cat.giField) return;
     (gi[cat.giField] || []).slice(0, 3).forEach(val => {
       const node = layout.attributeNodes.find(n => n.categoryId === cat.id && n.name === val);
-      if (node) links.push({ from: focused.position, to: node.position, color: cat.color, label: val });
+      if (node) links.push({ from: focused.position, to: node.position, color: cat.color });
     });
   });
   return links;
@@ -272,49 +327,102 @@ function subIsHighlighted(sub, focused, attrToSubs) {
 
 // ── 3D Components ─────────────────────────────────────────────────────
 
-function GenreSun({ genre, isFocused, dimmed, onSelect }) {
+function GenreSun({ genre, isFocused, dimmed, onSelect, onHover }) {
   return (
     <group position={genre.position}>
-      <mesh onClick={e => { e.stopPropagation(); onSelect(); }}>
-        <sphereGeometry args={[SUN_RADIUS, 32, 32]} />
+      <mesh
+        onClick={e => { e.stopPropagation(); onSelect(); }}
+        onPointerOver={e => { e.stopPropagation(); onHover(genre); }}
+        onPointerOut={e => { e.stopPropagation(); onHover(null); }}
+      >
+        <sphereGeometry args={[genre.sunRadius, 32, 32]} />
         <meshStandardMaterial
           color={genre.color} emissive={genre.color}
-          emissiveIntensity={isFocused ? 2.4 : (dimmed ? 0.28 : 1.1)}
-          toneMapped={false} opacity={dimmed ? 0.45 : 1} transparent={dimmed}
+          emissiveIntensity={isFocused ? 2.6 : (dimmed ? 0.25 : 1.1)}
+          toneMapped={false} opacity={dimmed ? 0.4 : 1} transparent={dimmed}
         />
       </mesh>
       <Html center distanceFactor={30} style={{ pointerEvents: "none" }}>
         <div style={{
-          color: "#fff", fontSize: isFocused ? 13 : 11,
+          color: "#fff", fontSize: isFocused ? 12 : 10,
           fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
           fontWeight: isFocused ? 700 : 500, letterSpacing: "0.02em",
-          background: isFocused ? "rgba(94,106,210,0.95)" : "rgba(10,10,15,0.75)",
-          padding: "3px 8px", borderRadius: 4, whiteSpace: "nowrap",
+          background: isFocused ? "rgba(94,106,210,0.96)" : "rgba(10,10,15,0.78)",
+          padding: "2px 7px", borderRadius: 4, whiteSpace: "nowrap",
           transform: "translate(-50%, 18px)", position: "absolute",
-          opacity: dimmed ? 0.4 : 1, userSelect: "none",
+          opacity: dimmed ? 0.38 : 1, userSelect: "none",
         }}>{genre.name}</div>
       </Html>
     </group>
   );
 }
 
+// Genre similarity lines with per-vertex color (one draw call)
+function GenreSimLines({ links, threshold }) {
+  const geo = useMemo(() => {
+    const filtered = links.filter(l => l.score >= threshold);
+    if (!filtered.length) return null;
+    const pos  = new Float32Array(filtered.length * 6);
+    const col  = new Float32Array(filtered.length * 6);
+    const cA   = new THREE.Color(), cB = new THREE.Color();
+    filtered.forEach(({ from, to, score, colorA, colorB }, i) => {
+      pos[i * 6]     = from[0]; pos[i * 6 + 1] = from[1]; pos[i * 6 + 2] = from[2];
+      pos[i * 6 + 3] = to[0];   pos[i * 6 + 4] = to[1];   pos[i * 6 + 5] = to[2];
+      cA.set(colorA); cB.set(colorB);
+      const t = (score - threshold) / (1 - threshold); // normalize opacity
+      col[i * 6]     = cA.r; col[i * 6 + 1] = cA.g; col[i * 6 + 2] = cA.b;
+      col[i * 6 + 3] = cB.r; col[i * 6 + 4] = cB.g; col[i * 6 + 5] = cB.b;
+    });
+    const g = new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+    g.setAttribute("color",    new THREE.BufferAttribute(col, 3));
+    return g;
+  }, [links, threshold]);
+
+  if (!geo) return null;
+  return (
+    <lineSegments geometry={geo}>
+      <lineBasicMaterial vertexColors transparent opacity={0.32} />
+    </lineSegments>
+  );
+}
+
+// Subgenre similarity lines (shown when subgenres visible)
+function SubgenreSimLines({ links, visible }) {
+  const geo = useMemo(() => {
+    if (!links.length) return null;
+    const pos = new Float32Array(links.length * 6);
+    links.forEach(({ from, to }, i) => {
+      pos[i * 6] = from[0]; pos[i * 6 + 1] = from[1]; pos[i * 6 + 2] = from[2];
+      pos[i * 6 + 3] = to[0]; pos[i * 6 + 4] = to[1]; pos[i * 6 + 5] = to[2];
+    });
+    const g = new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+    return g;
+  }, [links]);
+  if (!visible || !geo) return null;
+  return (
+    <lineSegments geometry={geo}>
+      <lineBasicMaterial color="#6366F1" transparent opacity={0.15} />
+    </lineSegments>
+  );
+}
+
 function SubgenreField({ subgenres, focused, attrToSubs, onHover, onSelect }) {
   return (
     <Instances limit={Math.max(subgenres.length, 1)} range={subgenres.length}>
-      <sphereGeometry args={[PLANET_RADIUS, 16, 16]} />
+      <sphereGeometry args={[PLANET_R, 14, 14]} />
       <meshStandardMaterial emissiveIntensity={0.9} toneMapped={false} />
       {subgenres.map(s => {
-        const highlighted = subIsHighlighted(s, focused, attrToSubs);
-        const isFocused   = focused?.kind === "subgenre" && focused.name === s.name && focused.parent === s.parent;
-        const dim         = focused && !highlighted;
-        const scl         = isFocused ? 1.75 : (highlighted && focused ? 1.2 : (dim ? 0.38 : 1));
+        const hi = subIsHighlighted(s, focused, attrToSubs);
+        const isF = focused?.kind === "subgenre" && focused.name === s.name && focused.parent === s.parent;
+        const dim = focused && !hi;
+        const scl = isF ? 1.75 : (hi && focused ? 1.2 : (dim ? 0.35 : 1));
         return (
-          <Instance key={s.parent + "/" + s.name}
-            position={s.position} color={s.color} scale={scl}
+          <Instance key={s.parent + "/" + s.name} position={s.position} color={s.color} scale={scl}
             onPointerOver={e => { e.stopPropagation(); onHover(s); }}
             onPointerOut={e => { e.stopPropagation(); onHover(null); }}
-            onClick={e => { e.stopPropagation(); onSelect(s); }}
-          />
+            onClick={e => { e.stopPropagation(); onSelect(s); }} />
         );
       })}
     </Instances>
@@ -324,21 +432,19 @@ function SubgenreField({ subgenres, focused, attrToSubs, onHover, onSelect }) {
 function MicrostyleField({ microstyles, focused, onHover, onSelect }) {
   return (
     <Instances limit={Math.max(microstyles.length, 1)} range={microstyles.length}>
-      <sphereGeometry args={[MOON_RADIUS, 10, 10]} />
+      <sphereGeometry args={[MOON_R, 10, 10]} />
       <meshStandardMaterial emissiveIntensity={0.7} toneMapped={false} />
       {microstyles.map(m => {
-        const isFocused     = focused?.kind === "microstyle" && focused.name === m.name && focused.parent === m.parent && focused.grandparent === m.grandparent;
-        const inFocusedSub  = focused?.kind === "subgenre"   && focused.name === m.parent && focused.parent === m.grandparent;
-        const inFocusedGenre = focused?.kind === "genre"     && focused.name === m.grandparent;
-        const dim = focused && !(isFocused || inFocusedSub || inFocusedGenre);
-        const scl = isFocused ? 2.4 : (inFocusedSub ? 1.35 : (dim ? 0.32 : 1));
+        const isF = focused?.kind === "microstyle" && focused.name === m.name && focused.parent === m.parent && focused.grandparent === m.grandparent;
+        const inSub  = focused?.kind === "subgenre"  && focused.name === m.parent && focused.parent === m.grandparent;
+        const inGenre = focused?.kind === "genre"    && focused.name === m.grandparent;
+        const dim = focused && !(isF || inSub || inGenre);
+        const scl = isF ? 2.4 : (inSub ? 1.35 : (dim ? 0.3 : 1));
         return (
-          <Instance key={m.grandparent + "/" + m.parent + "/" + m.name}
-            position={m.position} color={m.color} scale={scl}
+          <Instance key={m.grandparent + "/" + m.parent + "/" + m.name} position={m.position} color={m.color} scale={scl}
             onPointerOver={e => { e.stopPropagation(); onHover(m); }}
             onPointerOut={e => { e.stopPropagation(); onHover(null); }}
-            onClick={e => { e.stopPropagation(); onSelect(m); }}
-          />
+            onClick={e => { e.stopPropagation(); onSelect(m); }} />
         );
       })}
     </Instances>
@@ -348,21 +454,18 @@ function MicrostyleField({ microstyles, focused, onHover, onSelect }) {
 function AttributeCloudField({ attributeNodes, focused, attrToSubs, onHover, onSelect }) {
   return (
     <Instances limit={Math.max(attributeNodes.length, 1)} range={attributeNodes.length}>
-      <sphereGeometry args={[ATTR_RADIUS, 10, 10]} />
+      <sphereGeometry args={[ATTR_R, 10, 10]} />
       <meshStandardMaterial emissiveIntensity={0.85} toneMapped={false} />
       {attributeNodes.map(n => {
-        const isFocused = focused?.kind === "attribute" && focused.name === n.name && focused.categoryId === n.categoryId;
-        const linked    = focused?.kind === "subgenre" &&
-          (attrToSubs[n.categoryId + ":" + n.name]?.has(focused.name + "/" + focused.parent) ?? false);
-        const dim = focused && !isFocused && !linked;
-        const scl = isFocused ? 2.1 : (linked ? 1.3 : (dim ? 0.38 : 1));
+        const isF = focused?.kind === "attribute" && focused.name === n.name && focused.categoryId === n.categoryId;
+        const linked = focused?.kind === "subgenre" && (attrToSubs[n.categoryId + ":" + n.name]?.has(focused.name + "/" + focused.parent) ?? false);
+        const dim = focused && !isF && !linked;
+        const scl = isF ? 2.1 : (linked ? 1.3 : (dim ? 0.35 : 1));
         return (
-          <Instance key={n.categoryId + ":" + n.name}
-            position={n.position} color={n.color} scale={scl}
+          <Instance key={n.categoryId + ":" + n.name} position={n.position} color={n.color} scale={scl}
             onPointerOver={e => { e.stopPropagation(); onHover(n); }}
             onPointerOut={e => { e.stopPropagation(); onHover(null); }}
-            onClick={e => { e.stopPropagation(); onSelect(n); }}
-          />
+            onClick={e => { e.stopPropagation(); onSelect(n); }} />
         );
       })}
     </Instances>
@@ -373,38 +476,16 @@ function AttributeClusterLabels({ clusters }) {
   return (
     <>
       {clusters.map(c => (
-        <Html key={c.id} position={c.poleCenter} center distanceFactor={58} style={{ pointerEvents: "none" }}>
+        <Html key={c.id} position={c.poleCenter} center distanceFactor={60} style={{ pointerEvents: "none" }}>
           <div style={{
-            color: c.color, fontSize: 10,
-            fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+            color: c.color, fontSize: 9, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
             fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase",
-            background: "rgba(10,10,15,0.82)", padding: "2px 7px", borderRadius: 3,
+            background: "rgba(10,10,15,0.85)", padding: "2px 6px", borderRadius: 3,
             whiteSpace: "nowrap", userSelect: "none", border: `1px solid ${c.color}44`,
           }}>{c.label}</div>
         </Html>
       ))}
     </>
-  );
-}
-
-function SimilarityLinesMesh({ simLinks, visible }) {
-  const geo = useMemo(() => {
-    if (!simLinks.length) return null;
-    const pos = new Float32Array(simLinks.length * 6);
-    simLinks.forEach(({ from, to }, i) => {
-      pos[i * 6]     = from[0]; pos[i * 6 + 1] = from[1]; pos[i * 6 + 2] = from[2];
-      pos[i * 6 + 3] = to[0];  pos[i * 6 + 4] = to[1];  pos[i * 6 + 5] = to[2];
-    });
-    const g = new THREE.BufferGeometry();
-    g.setAttribute("position", new THREE.BufferAttribute(pos, 3));
-    return g;
-  }, [simLinks]);
-
-  if (!visible || !geo) return null;
-  return (
-    <lineSegments geometry={geo}>
-      <lineBasicMaterial color="#6366F1" transparent opacity={0.18} />
-    </lineSegments>
   );
 }
 
@@ -424,19 +505,18 @@ function AncestryLines({ focused, layout, visible }) {
     if (!focused || !visible) return [];
     const s = [];
     if (focused.kind === "subgenre") {
-      const genre = layout.genres.find(g => g.name === focused.parent);
-      const sub   = layout.subgenres.find(x => x.name === focused.name && x.parent === focused.parent);
-      if (genre && sub) s.push({ from: genre.position, to: sub.position, color: sub.color });
+      const g = layout.genres.find(x => x.name === focused.parent);
+      const sub = layout.subgenres.find(x => x.name === focused.name && x.parent === focused.parent);
+      if (g && sub) s.push({ from: g.position, to: sub.position, color: sub.color });
     } else if (focused.kind === "microstyle") {
-      const genre = layout.genres.find(g => g.name === focused.grandparent);
-      const sub   = layout.subgenres.find(x => x.name === focused.parent && x.parent === focused.grandparent);
+      const g = layout.genres.find(x => x.name === focused.grandparent);
+      const sub = layout.subgenres.find(x => x.name === focused.parent && x.parent === focused.grandparent);
       const micro = layout.microstyles.find(m => m.name === focused.name && m.parent === focused.parent && m.grandparent === focused.grandparent);
-      if (genre && sub) s.push({ from: genre.position, to: sub.position, color: sub.color });
+      if (g && sub) s.push({ from: g.position, to: sub.position, color: sub.color });
       if (sub && micro) s.push({ from: sub.position, to: micro.position, color: micro.color });
     }
     return s;
   }, [focused, layout, visible]);
-
   return (
     <>
       {segs.map((seg, i) => (
@@ -451,9 +531,8 @@ function HoverTooltip({ hovered }) {
   return (
     <Html position={hovered.position} center distanceFactor={20} style={{ pointerEvents: "none" }}>
       <div style={{
-        color: "#fff", fontSize: 11,
-        fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-        fontWeight: 600, background: "rgba(94,106,210,0.95)",
+        color: "#fff", fontSize: 11, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+        fontWeight: 600, background: "rgba(94,106,210,0.96)",
         padding: "4px 9px", borderRadius: 4, whiteSpace: "nowrap",
         transform: "translate(-50%, -30px)", position: "absolute",
         userSelect: "none", boxShadow: "0 2px 8px rgba(0,0,0,0.5)",
@@ -464,26 +543,19 @@ function HoverTooltip({ hovered }) {
   );
 }
 
-// CameraRig — animates to focused node, stops when settled,
-// then yields full control to OrbitControls (no more zoom fight).
+// Fixed CameraRig — stops fighting OrbitControls once settled
 function CameraRig({ focusTarget, controlsRef }) {
   const { camera } = useThree();
-  const animating  = useRef(false);
-  const destPos    = useRef(new THREE.Vector3(0, 8, 85));
-  const destTarget = useRef(new THREE.Vector3(0, 0, 0));
+  const animating = useRef(false);
+  const destPos   = useRef(new THREE.Vector3(0, 8, 90));
+  const destTgt   = useRef(new THREE.Vector3());
 
   useEffect(() => {
-    if (!focusTarget) {
-      animating.current = false;
-      return;
-    }
+    if (!focusTarget) { animating.current = false; return; }
     const t = new THREE.Vector3(...focusTarget.position);
-    destTarget.current.copy(t);
-    const fromOrigin = t.clone().normalize();
-    const dist = focusTarget.kind === "genre" ? 9
-               : focusTarget.kind === "subgenre" ? 5
-               : focusTarget.kind === "microstyle" ? 3 : 8;
-    destPos.current.copy(t.clone().add(fromOrigin.multiplyScalar(dist)));
+    destTgt.current.copy(t);
+    const dist = focusTarget.kind === "genre" ? 9 : focusTarget.kind === "subgenre" ? 5 : focusTarget.kind === "microstyle" ? 3 : 8;
+    destPos.current.copy(t.clone().add(t.clone().normalize().multiplyScalar(dist)));
     animating.current = true;
   }, [focusTarget]);
 
@@ -492,115 +564,97 @@ function CameraRig({ focusTarget, controlsRef }) {
     const k = Math.min(1, dt * 2.8);
     camera.position.lerp(destPos.current, k);
     if (controlsRef.current) {
-      controlsRef.current.target.lerp(destTarget.current, k);
+      controlsRef.current.target.lerp(destTgt.current, k);
       controlsRef.current.update();
     }
-    if (camera.position.distanceTo(destPos.current) < 0.07 &&
-        controlsRef.current?.target.distanceTo(destTarget.current) < 0.07) {
+    if (camera.position.distanceTo(destPos.current) < 0.07 && controlsRef.current?.target.distanceTo(destTgt.current) < 0.07)
       animating.current = false;
-    }
   });
-
   return null;
 }
 
 // ── UI Overlays ───────────────────────────────────────────────────────
 
-function Toggle({ on, onChange, label, color, disabled }) {
+function Toggle({ on, onChange, label, color, disabled, indent }) {
   return (
     <div onClick={() => !disabled && onChange(!on)} style={{
       display: "flex", alignItems: "center", gap: 9,
-      padding: "5px 10px", cursor: disabled ? "default" : "pointer",
-      opacity: disabled ? 0.38 : 1, userSelect: "none", borderRadius: 4,
+      padding: "4px 10px", paddingLeft: indent ? 22 : 10,
+      cursor: disabled ? "default" : "pointer",
+      opacity: disabled ? 0.35 : 1, userSelect: "none", borderRadius: 4,
     }}>
-      <span style={{
-        width: 9, height: 9, borderRadius: "50%", flexShrink: 0,
-        background: on ? color : "transparent", border: `1.5px solid ${color}`,
-      }} />
+      <span style={{ width: 8, height: 8, borderRadius: "50%", flexShrink: 0, background: on ? color : "transparent", border: `1.5px solid ${color}` }} />
       <span style={{ fontSize: 12, fontFamily: T.fontMono, color: T.text }}>{label}</span>
     </div>
   );
 }
 
-function SectionLabel({ label }) {
-  return (
-    <div style={{
-      padding: "6px 10px 4px", fontSize: 9, letterSpacing: "0.14em",
-      color: T.textMuted, textTransform: "uppercase",
-      borderBottom: `1px solid ${T.borderHi}`, marginBottom: 2, fontFamily: T.fontMono,
-    }}>{label}</div>
-  );
-}
-
-function LayerPanel({ layers, links, setLayers, setLinks }) {
+function LayerPanel({ layers, links, setLayers, setLinks, threshold, setThreshold }) {
   return (
     <div style={{
       position: "absolute", top: 16, left: 16,
-      background: "rgba(10,10,15,0.9)", border: `1px solid ${T.borderHi}`,
-      borderRadius: T.r_md, padding: "6px 0", backdropFilter: "blur(8px)",
-      minWidth: 196, zIndex: 10,
+      background: "rgba(10,10,15,0.92)", border: `1px solid ${T.borderHi}`,
+      borderRadius: T.r_md, padding: "6px 0", minWidth: 200, zIndex: 10,
     }}>
-      <SectionLabel label="Layers" />
+      <div style={{ padding: "4px 10px 4px", fontSize: 9, letterSpacing: ".14em", color: T.textMuted, textTransform: "uppercase", borderBottom: `1px solid ${T.borderHi}`, marginBottom: 2, fontFamily: T.fontMono }}>layers</div>
       <Toggle on label="Genres" color="#A78BFA" disabled />
-      <Toggle
-        on={layers.subgenres} label="Subgenres" color="#60A5FA"
-        onChange={v => setLayers(l => ({ ...l, subgenres: v, microstyles: !v ? false : l.microstyles }))}
-      />
-      <Toggle
-        on={layers.microstyles} label="Microstyles" color="#F472B6"
-        disabled={!layers.subgenres}
-        onChange={v => setLayers(l => ({ ...l, microstyles: v }))}
-      />
-      <Toggle
-        on={layers.attributes} label="Attribute cloud" color="#2DD4BF"
-        onChange={v => setLayers(l => ({ ...l, attributes: v }))}
-      />
+      <Toggle on={layers.subgenres} label="Subgenres" color="#60A5FA" onChange={v => setLayers(l => ({ ...l, subgenres: v, microstyles: !v ? false : l.microstyles }))} />
+      <Toggle on={layers.microstyles} label="Microstyles" color="#F472B6" disabled={!layers.subgenres} onChange={v => setLayers(l => ({ ...l, microstyles: v }))} indent />
+      <Toggle on={layers.attributes} label="Attribute cloud" color="#2DD4BF" onChange={v => setLayers(l => ({ ...l, attributes: v }))} />
 
       <div style={{ height: 6 }} />
-      <SectionLabel label="Links" />
-      <Toggle
-        on={links.all} label="All link lines" color="#E879F9"
-        onChange={v => setLinks(l => ({ ...l, all: v }))}
-      />
-      <div style={{ paddingLeft: 12, opacity: links.all ? 1 : 0.3, pointerEvents: links.all ? "auto" : "none" }}>
-        <Toggle on={links.ancestry}   label="Ancestry"        color="#94A3B8" disabled={!links.all} onChange={v => setLinks(l => ({ ...l, ancestry: v }))} />
-        <Toggle on={links.similarity} label="Genre similarity" color="#6366F1" disabled={!links.all} onChange={v => setLinks(l => ({ ...l, similarity: v }))} />
-        <Toggle on={links.attrs}      label="Attribute links"  color="#F9A8D4" disabled={!links.all} onChange={v => setLinks(l => ({ ...l, attrs: v }))} />
+      <div style={{ padding: "4px 10px 4px", fontSize: 9, letterSpacing: ".14em", color: T.textMuted, textTransform: "uppercase", borderBottom: `1px solid ${T.borderHi}`, marginBottom: 2, fontFamily: T.fontMono }}>links</div>
+      <Toggle on={links.all} label="All links" color="#E879F9" onChange={v => setLinks(l => ({ ...l, all: v }))} />
+      <div style={{ opacity: links.all ? 1 : 0.3, pointerEvents: links.all ? "auto" : "none" }}>
+        <Toggle on={links.genre} label="Genre similarity" color="#6366F1" disabled={!links.all} onChange={v => setLinks(l => ({ ...l, genre: v }))} indent />
+        <Toggle on={links.sub} label="Subgenre similarity" color="#818CF8" disabled={!links.all} onChange={v => setLinks(l => ({ ...l, sub: v }))} indent />
+        <Toggle on={links.attrs} label="Attribute links" color="#F9A8D4" disabled={!links.all} onChange={v => setLinks(l => ({ ...l, attrs: v }))} indent />
+        <Toggle on={links.ancestry} label="Ancestry" color="#94A3B8" disabled={!links.all} onChange={v => setLinks(l => ({ ...l, ancestry: v }))} indent />
       </div>
+
+      {/* Threshold slider for genre similarity */}
+      {links.all && links.genre && (
+        <div style={{ padding: "6px 10px 4px" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+            <span style={{ fontSize: 10, color: T.textMuted, fontFamily: T.fontMono }}>min similarity</span>
+            <span style={{ fontSize: 10, color: T.textSec, fontFamily: T.fontMono }}>{Math.round(threshold * 100)}%</span>
+          </div>
+          <input type="range" min={0.25} max={0.78} step={0.01} value={threshold}
+            onChange={e => setThreshold(parseFloat(e.target.value))}
+            style={{ width: "100%", accentColor: "#6366F1" }} />
+        </div>
+      )}
     </div>
   );
 }
 
-function FocusHUD({ focused, onClear }) {
-  if (!focused) {
-    return (
-      <div style={{
-        position: "absolute", bottom: 16, left: 16, fontSize: 11,
-        color: T.textMuted, fontFamily: T.fontMono,
-        background: "rgba(10,10,15,0.65)", padding: "6px 10px",
-        borderRadius: T.r_sm, backdropFilter: "blur(4px)", userSelect: "none",
-      }}>
-        drag · scroll · right-drag pan · click a node
-      </div>
-    );
-  }
+function FocusHUD({ focused, layout, onClear }) {
+  if (!focused) return (
+    <div style={{
+      position: "absolute", bottom: 16, left: 16, fontSize: 10,
+      color: T.textMuted, fontFamily: T.fontMono,
+      background: "rgba(10,10,15,0.65)", padding: "6px 10px",
+      borderRadius: T.r_sm, userSelect: "none", zIndex: 10,
+    }}>drag · scroll · click a node</div>
+  );
 
   let kindLabel, crumbs;
-  if      (focused.kind === "genre")       { kindLabel = "Genre";       crumbs = [focused.name]; }
-  else if (focused.kind === "subgenre")    { kindLabel = "Subgenre";    crumbs = [focused.parent, focused.name]; }
-  else if (focused.kind === "microstyle")  { kindLabel = "Microstyle";  crumbs = [focused.grandparent, focused.parent, focused.name]; }
-  else                                     { kindLabel = focused.categoryId; crumbs = [focused.label || focused.name]; }
+  if      (focused.kind === "genre")      { kindLabel = "Genre";      crumbs = [focused.name]; }
+  else if (focused.kind === "subgenre")   { kindLabel = "Subgenre";   crumbs = [focused.parent, focused.name]; }
+  else if (focused.kind === "microstyle") { kindLabel = "Microstyle"; crumbs = [focused.grandparent, focused.parent, focused.name]; }
+  else                                    { kindLabel = focused.categoryId; crumbs = [focused.label || focused.name]; }
+
+  // Show top similar genres when a genre is focused
+  const genre = focused.kind === "genre" ? layout.genres.find(g => g.name === focused.name) : null;
 
   return (
     <div style={{
       position: "absolute", bottom: 16, right: 16,
-      background: "rgba(10,10,15,0.92)", border: `1px solid ${T.borderHi}`,
-      borderRadius: T.r_md, padding: "10px 14px", backdropFilter: "blur(8px)",
-      fontFamily: T.fontMono, maxWidth: 360, zIndex: 10,
+      background: "rgba(10,10,15,0.93)", border: `1px solid ${T.borderHi}`,
+      borderRadius: T.r_md, padding: "10px 14px", maxWidth: 320,
+      fontFamily: T.fontMono, zIndex: 10,
     }}>
-      <div style={{ fontSize: 9, letterSpacing: "0.12em", color: T.textMuted, textTransform: "uppercase", marginBottom: 5 }}>
-        {kindLabel}
-      </div>
+      <div style={{ fontSize: 9, letterSpacing: ".12em", color: T.textMuted, textTransform: "uppercase", marginBottom: 5 }}>{kindLabel}</div>
       <div style={{ fontSize: 13, color: T.text, marginBottom: 8, wordBreak: "break-word" }}>
         {crumbs.map((c, i) => (
           <span key={i}>
@@ -609,10 +663,21 @@ function FocusHUD({ focused, onClear }) {
           </span>
         ))}
       </div>
+      {genre && (
+        <div style={{ borderTop: `1px solid ${T.borderHi}`, paddingTop: 8, marginBottom: 8 }}>
+          <div style={{ fontSize: 9, color: T.textMuted, letterSpacing: ".1em", marginBottom: 5 }}>MOST SIMILAR TO</div>
+          {genre.topSimilar.slice(0, 4).map(s => (
+            <div key={s.name} style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
+              <span style={{ fontSize: 11, color: T.textSec }}>{s.name}</span>
+              <span style={{ fontSize: 11, color: GENRE_COLORS[s.name] || DEFAULT_COLOR, fontWeight: 600 }}>{Math.round(s.score * 100)}%</span>
+            </div>
+          ))}
+        </div>
+      )}
       <button onClick={onClear} style={{
         fontSize: 10, color: T.textMuted, background: "transparent",
         border: `1px solid ${T.borderHi}`, borderRadius: T.r_sm,
-        padding: "3px 8px", cursor: "pointer", fontFamily: T.fontMono, letterSpacing: "0.05em",
+        padding: "3px 8px", cursor: "pointer", fontFamily: T.fontMono, letterSpacing: ".05em",
       }}>CLEAR ×</button>
     </div>
   );
@@ -624,11 +689,11 @@ function StatsBadge({ layout }) {
       position: "absolute", top: 16, right: 16, fontSize: 10,
       color: T.textMuted, fontFamily: T.fontMono,
       background: "rgba(10,10,15,0.65)", padding: "6px 10px",
-      borderRadius: T.r_sm, backdropFilter: "blur(4px)",
-      userSelect: "none", letterSpacing: "0.05em", lineHeight: 1.8, zIndex: 10,
+      borderRadius: T.r_sm, userSelect: "none", lineHeight: 1.8,
+      letterSpacing: ".04em", zIndex: 10,
     }}>
       <div>{layout.genres.length} genres · {layout.subgenres.length} sub · {layout.microstyles.length} micro</div>
-      <div>{layout.attributeNodes.length} attr nodes · {layout.simLinks.length} sim links</div>
+      <div>{layout.attributeNodes.length} attr · {layout.genreSimLinks.length} sim links</div>
     </div>
   );
 }
@@ -639,10 +704,11 @@ export default function GenreMap3D({ data }) {
   const layout         = useMemo(() => buildLayout(data || {}), [data]);
   const genreIntuition = useMemo(() => (data || {}).GENRE_INTUITION || {}, [data]);
 
-  const [layers, setLayers] = useState({ subgenres: true, microstyles: false, attributes: true });
-  const [links,  setLinks]  = useState({ all: true, ancestry: true, similarity: true, attrs: true });
-  const [focused, setFocused] = useState(null);
-  const [hovered, setHovered] = useState(null);
+  const [layers,    setLayers]    = useState({ subgenres: false, microstyles: false, attributes: false });
+  const [links,     setLinks]     = useState({ all: true, genre: true, sub: true, attrs: true, ancestry: true });
+  const [threshold, setThreshold] = useState(0.55);
+  const [focused,   setFocused]   = useState(null);
+  const [hovered,   setHovered]   = useState(null);
   const controlsRef = useRef();
 
   const attrLines = useMemo(() =>
@@ -650,21 +716,15 @@ export default function GenreMap3D({ data }) {
     [focused, layout, genreIntuition, links.all, links.attrs]
   );
 
-  const selectGenre      = g => setFocused({ kind: "genre",      name: g.name, position: g.position });
-  const selectSubgenre   = s => setFocused({ kind: "subgenre",   name: s.name, parent: s.parent, position: s.position });
-  const selectMicrostyle = m => setFocused({ kind: "microstyle", name: m.name, parent: m.parent, grandparent: m.grandparent, position: m.position });
-  const selectAttribute  = n => setFocused({ kind: "attribute",  name: n.name, label: n.label, categoryId: n.categoryId, position: n.position });
+  const sel = (f) => setFocused(f);
+  const selectGenre = g      => sel({ kind: "genre",      name: g.name, position: g.position });
+  const selectSub   = s      => sel({ kind: "subgenre",   name: s.name, parent: s.parent, position: s.position });
+  const selectMicro = m      => sel({ kind: "microstyle", name: m.name, parent: m.parent, grandparent: m.grandparent, position: m.position });
+  const selectAttr  = n      => sel({ kind: "attribute",  name: n.name, label: n.label, categoryId: n.categoryId, position: n.position });
 
   return (
-    <div style={{
-      position: "relative", width: "100%", height: "calc(100vh - 80px)",
-      minHeight: 500, background: "#04040B", overflow: "hidden",
-    }}>
-      <Canvas
-        camera={{ position: [0, 8, 90], fov: 52, near: 0.1, far: 600 }}
-        dpr={[1, 2]}
-        onPointerMissed={() => setFocused(null)}
-      >
+    <div style={{ position: "relative", width: "100%", height: "calc(100vh - 80px)", minHeight: 500, background: "#04040B", overflow: "hidden" }}>
+      <Canvas camera={{ position: [0, 8, 90], fov: 52, near: 0.1, far: 600 }} dpr={[1, 2]} onPointerMissed={() => setFocused(null)}>
         <color attach="background" args={["#04040B"]} />
         <ambientLight intensity={0.3} />
         <pointLight position={[0, 0, 0]} intensity={0.7} distance={250} />
@@ -672,76 +732,60 @@ export default function GenreMap3D({ data }) {
         <Suspense fallback={null}>
           <Stars radius={250} depth={80} count={2000} factor={4} saturation={0} fade speed={0.2} />
 
+          {/* Genre similarity network — the primary visual */}
+          {links.all && links.genre && (
+            <GenreSimLines links={layout.genreSimLinks} threshold={threshold} />
+          )}
+
+          {/* Genre suns */}
           {layout.genres.map(g => {
-            const gKey = `${g.name}`;
             const dimmed = !!focused && !(
               (focused.kind === "genre"       && focused.name === g.name) ||
               (focused.kind === "subgenre"    && focused.parent === g.name) ||
               (focused.kind === "microstyle"  && focused.grandparent === g.name) ||
-              (focused.kind === "attribute"   &&
-                [...(layout.attrToSubs[focused.categoryId + ":" + focused.name] || new Set())]
-                  .some(k => k.endsWith("/" + g.name)))
+              (focused.kind === "attribute"   && [...(layout.attrToSubs[focused.categoryId + ":" + focused.name] || new Set())].some(k => k.endsWith("/" + g.name)))
             );
             return (
-              <GenreSun key={gKey} genre={g}
+              <GenreSun key={g.name} genre={g}
                 isFocused={focused?.kind === "genre" && focused.name === g.name}
                 dimmed={dimmed}
                 onSelect={() => selectGenre(g)}
+                onHover={setHovered}
               />
             );
           })}
 
+          {/* Subgenres */}
           {layers.subgenres && (
-            <SubgenreField
-              subgenres={layout.subgenres} focused={focused}
-              attrToSubs={layout.attrToSubs}
-              onHover={setHovered} onSelect={selectSubgenre}
-            />
+            <SubgenreField subgenres={layout.subgenres} focused={focused} attrToSubs={layout.attrToSubs} onHover={setHovered} onSelect={selectSub} />
           )}
-
           {layers.subgenres && layers.microstyles && (
-            <MicrostyleField
-              microstyles={layout.microstyles} focused={focused}
-              onHover={setHovered} onSelect={selectMicrostyle}
-            />
+            <MicrostyleField microstyles={layout.microstyles} focused={focused} onHover={setHovered} onSelect={selectMicro} />
           )}
 
+          {/* Attribute cloud */}
           {layers.attributes && (
             <>
-              <AttributeCloudField
-                attributeNodes={layout.attributeNodes} focused={focused}
-                attrToSubs={layout.attrToSubs} subgenres={layout.subgenres}
-                onHover={setHovered} onSelect={selectAttribute}
-              />
+              <AttributeCloudField attributeNodes={layout.attributeNodes} focused={focused} attrToSubs={layout.attrToSubs} subgenres={layout.subgenres} onHover={setHovered} onSelect={selectAttr} />
               <AttributeClusterLabels clusters={layout.attributeClusters} />
             </>
           )}
 
-          {links.all && links.similarity && (
-            <SimilarityLinesMesh simLinks={layout.simLinks} visible />
-          )}
-          {links.all && links.attrs && (
-            <AttributeLinesMesh lines={attrLines} visible />
-          )}
-          {links.all && links.ancestry && (
-            <AncestryLines focused={focused} layout={layout} visible />
-          )}
+          {/* Links */}
+          {links.all && links.sub && layers.subgenres && <SubgenreSimLines links={layout.subSimLinks} visible />}
+          {links.all && links.attrs && <AttributeLinesMesh lines={attrLines} visible />}
+          {links.all && links.ancestry && <AncestryLines focused={focused} layout={layout} visible />}
 
           <HoverTooltip hovered={hovered} />
         </Suspense>
 
-        <OrbitControls
-          ref={controlsRef}
-          enableDamping dampingFactor={0.07}
-          minDistance={2} maxDistance={180}
-          rotateSpeed={0.55} zoomSpeed={0.9} panSpeed={0.6}
-        />
+        <OrbitControls ref={controlsRef} enableDamping dampingFactor={0.07} minDistance={2} maxDistance={180} rotateSpeed={0.55} zoomSpeed={0.9} panSpeed={0.6} />
         <CameraRig focusTarget={focused} controlsRef={controlsRef} />
       </Canvas>
 
-      <LayerPanel layers={layers} links={links} setLayers={setLayers} setLinks={setLinks} />
+      <LayerPanel layers={layers} links={links} setLayers={setLayers} setLinks={setLinks} threshold={threshold} setThreshold={setThreshold} />
       <StatsBadge layout={layout} />
-      <FocusHUD focused={focused} onClear={() => setFocused(null)} />
+      <FocusHUD focused={focused} layout={layout} onClear={() => setFocused(null)} />
     </div>
   );
 }
