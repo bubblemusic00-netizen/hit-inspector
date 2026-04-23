@@ -2206,7 +2206,12 @@ function NodeLabels({ items, mode, tier, focused, livePosRef = null }) {
 // reported. We wrap Html in a group and update its position per-frame
 // from livePosRef when the hovered node is an orbiting small, so the
 // label tracks the moving body.
-function HoverTooltip({ hovered, livePosRef = null }) {
+//
+// If the hovered node IS the currently-focused node, skip the tooltip
+// entirely — NodeLabels already renders the focused label in accent
+// styling, and drawing HoverTooltip on top produced a visible
+// double-label in focus+hover state (user-reported).
+function HoverTooltip({ hovered, focused = null, livePosRef = null }) {
   const groupRef = useRef();
   useFrame(() => {
     if (!hovered || !groupRef.current) return;
@@ -2220,6 +2225,18 @@ function HoverTooltip({ hovered, livePosRef = null }) {
     if (p) groupRef.current.position.set(p[0], p[1], p[2]);
   });
   if (!hovered || !hovered.pos) return null;
+  // Suppress tooltip when the user is hovering the currently-focused
+  // node itself — NodeLabels already renders its label in accent style,
+  // so drawing HoverTooltip on top produced a visible double label.
+  if (focused) {
+    const h = hovered;
+    const matches =
+      (focused.kind === "big"       && h.name === focused.name && !h.parent && !h.categoryId) ||
+      (focused.kind === "mid"       && h.name === focused.name && h.parent === focused.parent && !h.grandparent) ||
+      (focused.kind === "small"     && h.name === focused.name && h.parent === focused.parent && h.grandparent === focused.grandparent) ||
+      (focused.kind === "attribute" && h.name === focused.name && h.categoryId === focused.categoryId);
+    if (matches) return null;
+  }
   return (
     <group ref={groupRef}>
       <Html center distanceFactor={20} style={{ pointerEvents: "none" }}>
@@ -3584,9 +3601,38 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
           added++;
         }
       }
+      // Big → attribute edges. Some attrs associate at the genre level
+      // (from the aggregated `bigAttrEdges` table) and don't naturally
+      // fall under any particular mid's top-3 attrs — they would end up
+      // edge-less in ON mode, which is exactly the "floating attribute
+      // with no lines" the user reported. Same cap logic as mids.
+      if (layout.bigAttrEdges) {
+        const alreadyEmitted = new Set(
+          out
+            .filter(e => e.toNode?.kind === "attribute")
+            .map(e => `${e.fromNode.kind}/${e.fromNode.name}::${e.toNode.categoryId}:${e.toNode.name}`)
+        );
+        for (const b of visibleBigs) {
+          const attrs = layout.bigAttrEdges(b) || [];
+          let added = 0;
+          for (const { node, cat } of attrs) {
+            if (added >= 3) break;
+            if (!node?.pos) continue;
+            if (!visibleAttrKeys.has(`${node.categoryId}:${node.name}`)) continue;
+            const k = `big/${b.name}::${node.categoryId}:${node.name}`;
+            if (alreadyEmitted.has(k)) continue;
+            alreadyEmitted.add(k);
+            out.push({
+              from: b.pos, to: node.pos, color: (cat?.color) || node.color,
+              fromNode: { ...b, kind: "big" }, toNode: { ...node, kind: "attribute" },
+            });
+            added++;
+          }
+        }
+      }
     }
     return out;
-  }, [visibleMids, visibleSmalls, visibleAttributes, layout, layers.smalls, layers.mids, layers.attributes, filters.bigs]);
+  }, [visibleBigs, visibleMids, visibleSmalls, visibleAttributes, layout, layers.smalls, layers.mids, layers.attributes, filters.bigs]);
 
   const selectBig   = b => setFocused({ kind: "big",       name: b.name, pos: b.pos });
   const selectMid   = s => setFocused({ kind: "mid",       name: s.name, parent: s.parent, pos: s.pos });
@@ -3800,7 +3846,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
             focused={focused}
           />}
 
-          <HoverTooltip hovered={hovered} livePosRef={livePosRef} />
+          <HoverTooltip hovered={hovered} focused={focused} livePosRef={livePosRef} />
         </Suspense>
 
         <OrbitControls
