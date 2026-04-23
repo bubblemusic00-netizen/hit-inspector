@@ -1250,7 +1250,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
   const selectAttr  = a => setFocused({ kind: "attribute", name: a.name, label: a.label, categoryId: a.categoryId, pos: a.pos });
 
   return (
-    <div style={{ position: "relative", width: "100%", height: "calc(100vh - 80px)", minHeight: 500, background: "#04040B", overflow: "hidden" }}>
+    <div style={{ position: "relative", width: "100%", height: "100%", minHeight: 500, background: "#04040B", overflow: "hidden" }}>
       <Canvas camera={{ position: [0, 15, 130], fov: 50, near: 0.1, far: 800 }} dpr={[1, 2]} onPointerMissed={() => setFocused(null)}>
         <color attach="background" args={["#04040B"]} />
         <ambientLight intensity={0.32} />

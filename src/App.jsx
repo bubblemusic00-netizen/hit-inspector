@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { T } from "./theme.js";
 import Layout from "./components/Layout.jsx";
 import CategoryMap3D from "./components/CategoryMap3D.jsx";
+import CategoryList from "./components/CategoryList.jsx";
 import OverviewPage from "./components/OverviewPage.jsx";
 import SearchPage from "./components/SearchPage.jsx";
 import { CATEGORIES, buildDerivedData } from "./categories.js";
@@ -12,6 +13,10 @@ export default function App() {
   const [selected, setSelected] = useState("overview");
   const [tab, setTab] = useState("items");
   const [preselect, setPreselect] = useState(null);
+
+  // View mode persists across category navigation — user toggles once,
+  // stays in that view while browsing categories.
+  const [viewMode, setViewMode] = useState("map"); // "map" | "list"
 
   useEffect(() => {
     let cancelled = false;
@@ -48,29 +53,25 @@ export default function App() {
 
   const derived = buildDerivedData(raw.data);
 
-  // Every CATEGORY is rendered as a 3D galaxy via CategoryMap3D.
-  //   Genres / Subgenres / Microstyles — 18 genres → 294 subs → 1180 micros
-  //   Instruments                      — 17 families → instruments → articulations
-  //   Moods                            — 5 mood-cats → 40 moods (no smalls)
-  //   Other flat categories            — 1 hub → items (no smalls), with attr cloud
-  //   Languages                        — 1 hub → 22 languages (no attrs)
+  const isCategoryView = selected !== "overview" && selected !== "search";
+  // map3d sidebar item renders genres like the Genres page — same component,
+  // same toggle behavior.
+  const catIdForCategory = selected === "map3d" ? "genres" : selected;
+  const resolvedCat = CATEGORIES.find(c => c.id === catIdForCategory);
+
   let mainContent;
   if (selected === "overview") {
     mainContent = <OverviewPage raw={raw} derived={derived} />;
   } else if (selected === "search") {
     mainContent = <SearchPage data={raw.data} onResultClick={handleSearchResultClick} />;
-  } else if (selected === "map3d") {
-    mainContent = <CategoryMap3D categoryId="genres" data={raw.data} />;
+  } else if (!resolvedCat) {
+    mainContent = <div style={{ padding: T.s6, fontFamily: T.fontMono, color: T.textMuted }}>Unknown category.</div>;
+  } else if (viewMode === "list") {
+    mainContent = <CategoryList categoryId={resolvedCat.id} data={raw.data} />;
   } else {
-    const cat = CATEGORIES.find(c => c.id === selected);
-    if (!cat) {
-      mainContent = <div style={{ padding: T.s6 }}>Unknown category.</div>;
-    } else {
-      mainContent = <CategoryMap3D categoryId={cat.id} data={raw.data} />;
-    }
+    mainContent = <CategoryMap3D categoryId={resolvedCat.id} data={raw.data} />;
   }
 
-  // Hide the items/family/stats tab strip — the 3D map is the single view.
   return (
     <Layout
       selected={selected}
@@ -81,8 +82,46 @@ export default function App() {
       onTab={setTab}
       showTabs={false}
     >
-      {mainContent}
+      {/* Content area fills the viewport minus the header; toggle sits on
+          top and the actual view takes the remaining space. */}
+      <div style={{ height: "calc(100vh - 80px)", display: "flex", flexDirection: "column", overflow: "hidden" }}>
+        {isCategoryView && <ViewToggle mode={viewMode} onChange={setViewMode} label={resolvedCat ? resolvedCat.label : ""} />}
+        <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
+          {mainContent}
+        </div>
+      </div>
     </Layout>
+  );
+}
+
+function ViewToggle({ mode, onChange, label }) {
+  const btn = (id, txt) => (
+    <button onClick={() => onChange(id)} style={{
+      fontSize: 11, fontFamily: T.fontMono, letterSpacing: "0.08em",
+      padding: "5px 14px",
+      background: mode === id ? "rgba(94,106,210,0.22)" : "transparent",
+      color: mode === id ? T.text : T.textMuted,
+      border: "none", cursor: "pointer",
+      textTransform: "uppercase",
+    }}>{txt}</button>
+  );
+  return (
+    <div style={{
+      height: 38, flexShrink: 0,
+      display: "flex", alignItems: "center", justifyContent: "space-between",
+      padding: `0 ${T.s5}px`,
+      borderBottom: `1px solid ${T.borderHi}`,
+      background: T.bgCard,
+    }}>
+      <div style={{ fontFamily: T.fontMono, fontSize: 10, letterSpacing: "0.12em", color: T.textMuted, textTransform: "uppercase" }}>
+        {label}
+      </div>
+      <div style={{ display: "flex", alignItems: "center", border: `1px solid ${T.border}`, borderRadius: T.r_sm, overflow: "hidden" }}>
+        {btn("map", "3D Map")}
+        <div style={{ width: 1, height: 20, background: T.border }} />
+        {btn("list", "List")}
+      </div>
+    </div>
   );
 }
 
