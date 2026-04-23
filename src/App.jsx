@@ -94,7 +94,7 @@ export default function App() {
   } else if (selected === "search") {
     mainContent = <SearchPage data={raw.data} onResultClick={handleSearchResultClick} />;
   } else if (selected === "map3d") {
-    mainContent = <GenreMap3D genreTree={raw.data.GENRE_TREE} />;
+    mainContent = <GenreMap3D data={raw.data} />;
   } else {
     const cat = CATEGORIES.find(c => c.id === selected);
     if (!cat) mainContent = <div style={{ padding: T.s6 }}>Unknown category.</div>;
