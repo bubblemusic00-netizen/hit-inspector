@@ -120,12 +120,26 @@ const CAT_TO_COMP_FIELD = Object.fromEntries(
 
 // ── Visual / geometric constants ───────────────────────────────────
 const BIG_R      = 1.3;
-const MID_R      = 0.48;   // was 0.34 — too small to see
-const SMALL_R    = 0.2;    // was 0.11 — invisible without zooming in
-const ATTR_R     = 0.32;   // was 0.24 — matched up with mids
+const MID_R      = 0.48;
+const SMALL_R    = 0.2;
+const ATTR_R     = 0.32;
 const MID_ORBIT  = 5.0;
-const SMALL_ORBIT= 1.8;    // was 1.0 — give micros breathing room so
-                           // they don't clip into the sub when scaled up
+const SMALL_ORBIT= 2.8;    // was 1.8 — spread micros further from their sub
+                           // so they don't clip when scaled up
+
+// Default size multipliers — applied on top of every tier's base radius.
+// The customization slider still reads "1.0×" at its default position,
+// but visually the note is this much bigger. Keeps the UI familiar
+// while making the default view more readable.
+const BIG_MULT   = 1.4;
+const MID_MULT   = 1.4;
+const SMALL_MULT = 1.6;
+const ATTR_MULT  = 1.6;
+
+// Halo multiplier — the glow halo is this much larger than the note body.
+// Combined with additive blending, creates a soft bloom-like glow that
+// scales with the note's color without needing post-processing.
+const HALO_MULT  = 1.7;
 
 // ── Musical note geometry (compound: body + stem + cap + flag) ─────
 // Ported and simplified from the MusicPlanet design. Each part has a
@@ -188,10 +202,9 @@ function bandedBody(geom) {
   const pos = g.getAttribute("position");
   const n = pos.count;
   const colors = new Float32Array(n * 3);
-  // Band brightnesses — lifted from MusicPlanet's HSL lightness values
-  // (0.88, 0.62, 0.38, 0.14) but brightened a bit so dark bands don't
-  // look black when multiplied by darker instance colors.
-  const tints = [0.95, 0.78, 0.55, 0.35];
+  // Band brightnesses — boosted contrast so the striping reads even on
+  // small micro nodes. Range 1.0 → 0.22 (was 0.95 → 0.35).
+  const tints = [1.00, 0.72, 0.48, 0.22];
   for (let i = 0; i < n; i++) {
     const y = pos.getY(i);
     const x = pos.getX(i);
@@ -289,6 +302,30 @@ function buildGlowyInstancedMaterial({ metalness = 0.4, roughness = 0.4, emissiv
 const MAT_MID   = buildGlowyInstancedMaterial({ metalness: 0.42, roughness: 0.38, emissive: 0x4a4a4a });
 const MAT_SMALL = buildGlowyInstancedMaterial({ metalness: 0.38, roughness: 0.42, emissive: 0x3e3e3e });
 const MAT_ATTR  = buildGlowyInstancedMaterial({ metalness: 0.38, roughness: 0.40, emissive: 0x484848 });
+
+// ── Glow halo ─────────────────────────────────────────────────────
+// A slightly-larger transparent sphere rendered behind each note with
+// additive blending. This creates a real volumetric-looking glow in the
+// note's own color — no post-processing needed, scales to thousands of
+// instances. The halo follows the same transform as the note body.
+const HALO_GEOM = withTint(new THREE.SphereGeometry(1.0, 16, 10), 1.0);
+
+function buildHaloMaterial(opacity) {
+  return new THREE.MeshBasicMaterial({
+    color: 0xffffff,
+    vertexColors: true,        // required for instanceColor to reach fragment
+    transparent: true,
+    opacity,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    toneMapped: false,
+    side: THREE.FrontSide,
+  });
+}
+const MAT_HALO_BIG   = buildHaloMaterial(0.28);
+const MAT_HALO_MID   = buildHaloMaterial(0.22);
+const MAT_HALO_SMALL = buildHaloMaterial(0.20);
+const MAT_HALO_ATTR  = buildHaloMaterial(0.22);
 
 // ── Math helpers ─────────────────────────────────────────────────────
 function fibSphere(n) {
@@ -658,7 +695,7 @@ function buildGenreLayout(data) {
     const gi_ = idToIdx["b:" + gName];
     Object.keys(tree[gName]).forEach(sName => {
       const si = idToIdx["m:" + gName + "/" + sName];
-      edges.push({ from: gi_, to: si, kind: "tree", strength: 2.6, ideal: 5.0 });
+      edges.push({ from: gi_, to: si, kind: "tree", strength: 2.6, ideal: 7.5 });
     });
   });
 
@@ -699,8 +736,8 @@ function buildGenreLayout(data) {
   const mids = forceNodes.filter(n => n.kind === "mid");
   const attributes = forceNodes.filter(n => n.kind === "attribute");
   // Anti-clipping passes so no two nodes sit inside each other.
-  declusterTier(mids, MID_R * 2 + 0.15, 15);
-  declusterTier(attributes, ATTR_R * 2 + 0.1, 10);
+  declusterTier(mids, MID_R * 2 * MID_MULT + 0.4, 15);
+  declusterTier(attributes, ATTR_R * 2 * ATTR_MULT + 0.25, 10);
   const bigByName = {}; bigs.forEach(b => { bigByName[b.name] = b; });
   const midsByKey = {}; mids.forEach(m => { midsByKey[m.name + "/" + m.parent] = m; });
 
@@ -715,7 +752,7 @@ function buildGenreLayout(data) {
     });
   });
   const smalls = placeSmallsOrbital(mids, smallsRaw);
-  declusterTier(smalls, SMALL_R * 2 + 0.05, 8);
+  declusterTier(smalls, SMALL_R * 2 * SMALL_MULT + 0.15, 8);
 
   // ── 4. Aggregated genre→attr table — used for `bigAttrEdges` only,
   //     not for layout edges (those come from sub→attr directly).
@@ -818,7 +855,7 @@ function buildInstrumentsLayout(data) {
     });
   });
   const { mids, midsByKey } = placeMidsOrbital(midsRaw, bigByName, null, null);
-  declusterTier(mids, MID_R * 2 + 0.15, 15);
+  declusterTier(mids, MID_R * 2 * MID_MULT + 0.4, 15);
 
   const smallsRaw = [];
   fNames.forEach(fName => {
@@ -830,7 +867,7 @@ function buildInstrumentsLayout(data) {
     });
   });
   const smalls = placeSmallsOrbital(mids, smallsRaw);
-  declusterTier(smalls, SMALL_R * 2 + 0.05, 8);
+  declusterTier(smalls, SMALL_R * 2 * SMALL_MULT + 0.15, 8);
 
   return {
     kind: "instruments",
@@ -933,8 +970,8 @@ function buildMoodsLayout(data) {
   };
 
   const { mids, midsByKey } = placeMidsOrbital(midsRaw, bigByName, attrByKey, attrLookup);
-  declusterTier(mids, MID_R * 2 + 0.15, 15);
-  declusterTier(attributes, ATTR_R * 2 + 0.1, 10);
+  declusterTier(mids, MID_R * 2 * MID_MULT + 0.4, 15);
+  declusterTier(attributes, ATTR_R * 2 * ATTR_MULT + 0.25, 10);
 
   return {
     kind: "moods",
@@ -1070,8 +1107,8 @@ function buildFlatLayout(data, categoryId) {
   // Larger orbit radius for flat layouts since many items share one hub
   const orbit = items.length > 30 ? 9 : items.length > 15 ? 7 : 5;
   const { mids, midsByKey } = placeMidsOrbital(midsRaw, bigByName, attrByKey, attrLookup, orbit);
-  declusterTier(mids, MID_R * 2 + 0.15, 15);
-  declusterTier(attributes, ATTR_R * 2 + 0.1, 10);
+  declusterTier(mids, MID_R * 2 * MID_MULT + 0.4, 15);
+  declusterTier(attributes, ATTR_R * 2 * ATTR_MULT + 0.25, 10);
 
   // Singular label
   const singular = cat.label.endsWith("s") ? cat.label.slice(0, -1) : cat.label;
@@ -1220,7 +1257,7 @@ function BigNoteNode({ b, focused, sizeMult, showLabel, onSelect, onHover }) {
   const dim = focused && !isF && !related;
 
   return (
-    <group position={b.pos} scale={sizeMult * BIG_R}>
+    <group position={b.pos} scale={sizeMult * BIG_R * BIG_MULT}>
       <group ref={spinRef} rotation={[0, sp.phase, 0]}>
         <mesh
           onClick={e => { e.stopPropagation(); onSelect(b); }}
@@ -1234,6 +1271,16 @@ function BigNoteNode({ b, focused, sizeMult, showLabel, onSelect, onHover }) {
             metalness={0.6} roughness={0.25}
             vertexColors
             toneMapped={false} opacity={dim ? 0.45 : 1} transparent={dim}
+          />
+        </mesh>
+        {/* Halo — additive-blended sphere behind the body for volumetric glow */}
+        <mesh scale={HALO_MULT} raycast={() => null}>
+          <primitive object={HALO_GEOM} attach="geometry" />
+          <meshBasicMaterial
+            color={b.color}
+            transparent opacity={isF ? 0.55 : (dim ? 0.1 : 0.32)}
+            blending={THREE.AdditiveBlending}
+            depthWrite={false} toneMapped={false}
           />
         </mesh>
       </group>
@@ -1271,6 +1318,7 @@ function BigNodes({ bigs, focused, layout, onSelect, onHover, sizeMult = 1, show
 // matrices are rewritten each frame with focus scale + spin angle.
 function MidNodes({ mids, focused, layout, onSelect, onHover, sizeMult = 1 }) {
   const meshRef = useRef();
+  const haloRef = useRef();
   const tmpObj = useMemo(() => new THREE.Object3D(), []);
   const tmpColor = useMemo(() => new THREE.Color(), []);
 
@@ -1280,18 +1328,20 @@ function MidNodes({ mids, focused, layout, onSelect, onHover, sizeMult = 1 }) {
   }), [mids]);
 
   useEffect(() => {
-    const mesh = meshRef.current;
-    if (!mesh || !mids.length) return;
+    const m = meshRef.current, h = haloRef.current;
+    if (!m || !mids.length) return;
     for (let i = 0; i < mids.length; i++) {
       tmpColor.set(mids[i].color);
-      mesh.setColorAt(i, tmpColor);
+      m.setColorAt(i, tmpColor);
+      if (h) h.setColorAt(i, tmpColor);
     }
-    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    if (m.instanceColor) m.instanceColor.needsUpdate = true;
+    if (h?.instanceColor) h.instanceColor.needsUpdate = true;
   }, [mids, tmpColor]);
 
   useFrame(({ clock }) => {
-    const mesh = meshRef.current;
-    if (!mesh || !mids.length) return;
+    const m = meshRef.current, h = haloRef.current;
+    if (!m || !mids.length) return;
     const t = clock.elapsedTime;
     for (let i = 0; i < mids.length; i++) {
       const s = mids[i];
@@ -1300,27 +1350,40 @@ function MidNodes({ mids, focused, layout, onSelect, onHover, sizeMult = 1 }) {
       const rel = isMidRelated(s, focused, layout);
       const dim = focused && !rel;
       const scl = isF ? 1.75 : (rel && focused ? 1.25 : (dim ? 0.35 : 1));
+      const baseScale = scl * sizeMult * MID_R * MID_MULT;
       tmpObj.position.set(s.pos[0], s.pos[1], s.pos[2]);
       tmpObj.rotation.set(0, sd.phase + t * sd.speed, 0);
-      tmpObj.scale.setScalar(scl * sizeMult * MID_R);
+      tmpObj.scale.setScalar(baseScale);
       tmpObj.updateMatrix();
-      mesh.setMatrixAt(i, tmpObj.matrix);
+      m.setMatrixAt(i, tmpObj.matrix);
+      if (h) {
+        tmpObj.scale.setScalar(baseScale * HALO_MULT);
+        tmpObj.updateMatrix();
+        h.setMatrixAt(i, tmpObj.matrix);
+      }
     }
-    mesh.instanceMatrix.needsUpdate = true;
+    m.instanceMatrix.needsUpdate = true;
+    if (h) h.instanceMatrix.needsUpdate = true;
   });
 
   if (!mids.length) return null;
   return (
-    <instancedMesh
-      ref={meshRef}
-      args={[undefined, undefined, mids.length]}
-      onClick={e => { e.stopPropagation(); if (e.instanceId != null) onSelect(mids[e.instanceId]); }}
-      onPointerOver={e => { e.stopPropagation(); if (e.instanceId != null) onHover(mids[e.instanceId]); }}
-      onPointerOut={e => { e.stopPropagation(); onHover(null); }}
-    >
-      <primitive object={NOTE_GEOM} attach="geometry" />
-      <primitive object={MAT_MID} attach="material" />
-    </instancedMesh>
+    <>
+      <instancedMesh
+        ref={meshRef}
+        args={[undefined, undefined, mids.length]}
+        onClick={e => { e.stopPropagation(); if (e.instanceId != null) onSelect(mids[e.instanceId]); }}
+        onPointerOver={e => { e.stopPropagation(); if (e.instanceId != null) onHover(mids[e.instanceId]); }}
+        onPointerOut={e => { e.stopPropagation(); onHover(null); }}
+      >
+        <primitive object={NOTE_GEOM} attach="geometry" />
+        <primitive object={MAT_MID} attach="material" />
+      </instancedMesh>
+      <instancedMesh ref={haloRef} args={[undefined, undefined, mids.length]} raycast={() => null}>
+        <primitive object={HALO_GEOM} attach="geometry" />
+        <primitive object={MAT_HALO_MID} attach="material" />
+      </instancedMesh>
+    </>
   );
 }
 
@@ -1331,6 +1394,7 @@ function MidNodes({ mids, focused, layout, onSelect, onHover, sizeMult = 1 }) {
 // every micro so they don't all orbit in the same plane.
 function SmallNodes({ smalls, focused, onSelect, onHover, sizeMult = 1, layout }) {
   const meshRef = useRef();
+  const haloRef = useRef();
   const tmpObj = useMemo(() => new THREE.Object3D(), []);
   const tmpColor = useMemo(() => new THREE.Color(), []);
   const tmpVec = useMemo(() => new THREE.Vector3(), []);
@@ -1348,8 +1412,6 @@ function SmallNodes({ smalls, focused, onSelect, onHover, sizeMult = 1, layout }
       const cy = parent?.pos?.[1] ?? s.pos[1];
       const cz = parent?.pos?.[2] ?? s.pos[2];
       const seed = hash01(s.grandparent + "/" + s.parent + "/" + s.name);
-      // Random rotation axis per-small (deterministic via hash) so each
-      // moon has a unique orbital plane.
       const ax = Math.sin(seed * 7.13);
       const ay = Math.cos(seed * 5.81);
       const az = Math.sin(seed * 3.43 + 1.1);
@@ -1358,63 +1420,78 @@ function SmallNodes({ smalls, focused, onSelect, onHover, sizeMult = 1, layout }
         cx, cy, cz,
         ox: s.pos[0] - cx, oy: s.pos[1] - cy, oz: s.pos[2] - cz,
         axx: ax / aLen, axy: ay / aLen, axz: az / aLen,
-        orbitSpeed: 0.05 + seed * 0.12,   // slow (Earth-around-sun pace)
+        // Orbit — much slower than self-spin (Earth-around-sun vs self rotation)
+        orbitSpeed: 0.015 + seed * 0.035,
         orbitPhase: seed * Math.PI * 2,
-        spinSpeed: 0.3 + seed * 0.6,      // faster self-rotation
+        // Self-spin — noticeably faster than orbit
+        spinSpeed: 0.30 + seed * 0.70,
         spinPhase: (1 - seed) * Math.PI * 2,
       };
     });
   }, [smalls, layout]);
 
   useEffect(() => {
-    const mesh = meshRef.current;
-    if (!mesh || !smalls.length) return;
+    const m = meshRef.current, h = haloRef.current;
+    if (!m || !smalls.length) return;
     for (let i = 0; i < smalls.length; i++) {
       tmpColor.set(smalls[i].color);
-      mesh.setColorAt(i, tmpColor);
+      m.setColorAt(i, tmpColor);
+      if (h) h.setColorAt(i, tmpColor);
     }
-    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    if (m.instanceColor) m.instanceColor.needsUpdate = true;
+    if (h?.instanceColor) h.instanceColor.needsUpdate = true;
   }, [smalls, tmpColor]);
 
   useFrame(({ clock }) => {
-    const mesh = meshRef.current;
-    if (!mesh || !smalls.length) return;
+    const m = meshRef.current, h = haloRef.current;
+    if (!m || !smalls.length) return;
     const t = clock.elapsedTime;
     for (let i = 0; i < smalls.length; i++) {
-      const m = smalls[i];
+      const s = smalls[i];
       const d = orbitData[i];
-      const isF = focused?.kind === "small" && focused.name === m.name && focused.parent === m.parent && focused.grandparent === m.grandparent;
-      const inMid = focused?.kind === "mid" && focused.name === m.parent && focused.parent === m.grandparent;
-      const inBig = focused?.kind === "big" && focused.name === m.grandparent;
+      const isF = focused?.kind === "small" && focused.name === s.name && focused.parent === s.parent && focused.grandparent === s.grandparent;
+      const inMid = focused?.kind === "mid" && focused.name === s.parent && focused.parent === s.grandparent;
+      const inBig = focused?.kind === "big" && focused.name === s.grandparent;
       const dim = focused && !(isF || inMid || inBig);
       const scl = isF ? 2.4 : (inMid ? 1.35 : (dim ? 0.3 : 1));
+      const baseScale = scl * sizeMult * SMALL_R * SMALL_MULT;
 
-      // Orbit: rotate the initial offset vector around the random axis.
       tmpAxis.set(d.axx, d.axy, d.axz);
       tmpQuat.setFromAxisAngle(tmpAxis, d.orbitPhase + t * d.orbitSpeed);
       tmpVec.set(d.ox, d.oy, d.oz).applyQuaternion(tmpQuat);
       tmpObj.position.set(d.cx + tmpVec.x, d.cy + tmpVec.y, d.cz + tmpVec.z);
-      // Self-spin — simple Y rotation, faster than orbit.
       tmpObj.rotation.set(0, d.spinPhase + t * d.spinSpeed, 0);
-      tmpObj.scale.setScalar(scl * sizeMult * SMALL_R);
+      tmpObj.scale.setScalar(baseScale);
       tmpObj.updateMatrix();
-      mesh.setMatrixAt(i, tmpObj.matrix);
+      m.setMatrixAt(i, tmpObj.matrix);
+      if (h) {
+        tmpObj.scale.setScalar(baseScale * HALO_MULT);
+        tmpObj.updateMatrix();
+        h.setMatrixAt(i, tmpObj.matrix);
+      }
     }
-    mesh.instanceMatrix.needsUpdate = true;
+    m.instanceMatrix.needsUpdate = true;
+    if (h) h.instanceMatrix.needsUpdate = true;
   });
 
   if (!smalls.length) return null;
   return (
-    <instancedMesh
-      ref={meshRef}
-      args={[undefined, undefined, smalls.length]}
-      onClick={e => { e.stopPropagation(); if (e.instanceId != null) onSelect(smalls[e.instanceId]); }}
-      onPointerOver={e => { e.stopPropagation(); if (e.instanceId != null) onHover(smalls[e.instanceId]); }}
-      onPointerOut={e => { e.stopPropagation(); onHover(null); }}
-    >
-      <primitive object={NOTE_GEOM} attach="geometry" />
-      <primitive object={MAT_SMALL} attach="material" />
-    </instancedMesh>
+    <>
+      <instancedMesh
+        ref={meshRef}
+        args={[undefined, undefined, smalls.length]}
+        onClick={e => { e.stopPropagation(); if (e.instanceId != null) onSelect(smalls[e.instanceId]); }}
+        onPointerOver={e => { e.stopPropagation(); if (e.instanceId != null) onHover(smalls[e.instanceId]); }}
+        onPointerOut={e => { e.stopPropagation(); onHover(null); }}
+      >
+        <primitive object={NOTE_GEOM} attach="geometry" />
+        <primitive object={MAT_SMALL} attach="material" />
+      </instancedMesh>
+      <instancedMesh ref={haloRef} args={[undefined, undefined, smalls.length]} raycast={() => null}>
+        <primitive object={HALO_GEOM} attach="geometry" />
+        <primitive object={MAT_HALO_SMALL} attach="material" />
+      </instancedMesh>
+    </>
   );
 }
 
@@ -1422,6 +1499,7 @@ function SmallNodes({ smalls, focused, onSelect, onHover, sizeMult = 1, layout }
 // that isn't parented to any single node).
 function AttributeNodes({ attributes, focused, layout, onSelect, onHover, sizeMult = 1 }) {
   const meshRef = useRef();
+  const haloRef = useRef();
   const tmpObj = useMemo(() => new THREE.Object3D(), []);
   const tmpColor = useMemo(() => new THREE.Color(), []);
 
@@ -1431,18 +1509,20 @@ function AttributeNodes({ attributes, focused, layout, onSelect, onHover, sizeMu
   }), [attributes]);
 
   useEffect(() => {
-    const mesh = meshRef.current;
-    if (!mesh || !attributes.length) return;
+    const m = meshRef.current, h = haloRef.current;
+    if (!m || !attributes.length) return;
     for (let i = 0; i < attributes.length; i++) {
       tmpColor.set(attributes[i].color);
-      mesh.setColorAt(i, tmpColor);
+      m.setColorAt(i, tmpColor);
+      if (h) h.setColorAt(i, tmpColor);
     }
-    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    if (m.instanceColor) m.instanceColor.needsUpdate = true;
+    if (h?.instanceColor) h.instanceColor.needsUpdate = true;
   }, [attributes, tmpColor]);
 
   useFrame(({ clock }) => {
-    const mesh = meshRef.current;
-    if (!mesh || !attributes.length) return;
+    const m = meshRef.current, h = haloRef.current;
+    if (!m || !attributes.length) return;
     const t = clock.elapsedTime;
     for (let i = 0; i < attributes.length; i++) {
       const a = attributes[i];
@@ -1451,27 +1531,40 @@ function AttributeNodes({ attributes, focused, layout, onSelect, onHover, sizeMu
       const rel = isAttrRelated(a, focused, layout);
       const dim = focused && !isF && !rel;
       const scl = isF ? 2.2 : (rel && focused ? 1.4 : (dim ? 0.4 : 1));
+      const baseScale = scl * sizeMult * ATTR_R * ATTR_MULT;
       tmpObj.position.set(a.pos[0], a.pos[1], a.pos[2]);
       tmpObj.rotation.set(0, sd.phase + t * sd.speed, 0);
-      tmpObj.scale.setScalar(scl * sizeMult * ATTR_R);
+      tmpObj.scale.setScalar(baseScale);
       tmpObj.updateMatrix();
-      mesh.setMatrixAt(i, tmpObj.matrix);
+      m.setMatrixAt(i, tmpObj.matrix);
+      if (h) {
+        tmpObj.scale.setScalar(baseScale * HALO_MULT);
+        tmpObj.updateMatrix();
+        h.setMatrixAt(i, tmpObj.matrix);
+      }
     }
-    mesh.instanceMatrix.needsUpdate = true;
+    m.instanceMatrix.needsUpdate = true;
+    if (h) h.instanceMatrix.needsUpdate = true;
   });
 
   if (!attributes.length) return null;
   return (
-    <instancedMesh
-      ref={meshRef}
-      args={[undefined, undefined, attributes.length]}
-      onClick={e => { e.stopPropagation(); if (e.instanceId != null) onSelect(attributes[e.instanceId]); }}
-      onPointerOver={e => { e.stopPropagation(); if (e.instanceId != null) onHover(attributes[e.instanceId]); }}
-      onPointerOut={e => { e.stopPropagation(); onHover(null); }}
-    >
-      <primitive object={NOTE_GEOM} attach="geometry" />
-      <primitive object={MAT_ATTR} attach="material" />
-    </instancedMesh>
+    <>
+      <instancedMesh
+        ref={meshRef}
+        args={[undefined, undefined, attributes.length]}
+        onClick={e => { e.stopPropagation(); if (e.instanceId != null) onSelect(attributes[e.instanceId]); }}
+        onPointerOver={e => { e.stopPropagation(); if (e.instanceId != null) onHover(attributes[e.instanceId]); }}
+        onPointerOut={e => { e.stopPropagation(); onHover(null); }}
+      >
+        <primitive object={NOTE_GEOM} attach="geometry" />
+        <primitive object={MAT_ATTR} attach="material" />
+      </instancedMesh>
+      <instancedMesh ref={haloRef} args={[undefined, undefined, attributes.length]} raycast={() => null}>
+        <primitive object={HALO_GEOM} attach="geometry" />
+        <primitive object={MAT_HALO_ATTR} attach="material" />
+      </instancedMesh>
+    </>
   );
 }
 
@@ -1949,7 +2042,6 @@ function AttrCategoryChips({ layout, filters, setFilters }) {
 function LayerPanel({
   layers, setLayers, layout,
   linesMode, setLinesMode,
-  autoRotate, setAutoRotate,
   filters, setFilters,
   search, setSearch,
   searchResults, onSearchResultClick,
@@ -1958,13 +2050,11 @@ function LayerPanel({
   lineOpacity, setLineOpacity,
   allLinesOpacity, setAllLinesOpacity,
   rotateSpeed, setRotateSpeed,
-  bgStars, setBgStars,
   glowIntensity, setGlowIntensity,
   onResetCustomization,
 }) {
-  // Panel is draggable by its header. Position is kept in local state —
-  // resets to top-left when the category changes (outer component remounts).
   const [pos, setPos] = useState({ x: 16, y: 16 });
+  const [tab, setTab] = useState("view"); // view | filter | style
   const dragStart = useRef(null);
 
   const onHeaderMouseDown = (e) => {
@@ -1988,14 +2078,10 @@ function LayerPanel({
     e.preventDefault();
   };
 
-  // Big options — all bigs, color-tagged.
   const bigItems = useMemo(() => layout.bigs.map(b => ({
     value: b.name, label: b.name, color: b.color,
   })), [layout.bigs]);
 
-  // Mid options — scoped to currently-filtered bigs (so picking "Hip-Hop"
-  // at the genre level narrows the subgenre list). Each item is tagged
-  // with its parent genre's color so it's visually grouped.
   const midItems = useMemo(() => {
     const bigColorByName = {};
     for (const b of layout.bigs) bigColorByName[b.name] = b.color;
@@ -2003,23 +2089,17 @@ function LayerPanel({
     if (filters.bigs) src = src.filter(m => filters.bigs.has(m.parent));
     return src
       .map(m => ({
-        value: m.name,
-        label: m.name,
-        group: m.parent,
+        value: m.name, label: m.name, group: m.parent,
         color: bigColorByName[m.parent] || "#5E6AD2",
       }))
       .sort((a, b) => a.label.localeCompare(b.label));
   }, [layout.mids, layout.bigs, filters.bigs]);
 
-  // Local filter text for each list — keeps scrolling manageable
-  // when there are hundreds of subgenres.
   const [bigQuery, setBigQuery] = useState("");
   const [midQuery, setMidQuery] = useState("");
 
   const setBigsFilter = (next) => {
     setFilters(f => {
-      // If some mid in the current mids-set doesn't exist under any
-      // selected big, drop it so the state stays consistent.
       if (next && f.mids) {
         const allowedMidNames = new Set(
           layout.mids.filter(m => next.has(m.parent)).map(m => m.name)
@@ -2036,40 +2116,47 @@ function LayerPanel({
   const pctFmt  = v => (v * 100).toFixed(0) + "%";
   const multFmt = v => v.toFixed(1) + "×";
 
+  const tabs = [
+    { id: "view",   label: "View" },
+    { id: "filter", label: "Filter" },
+    { id: "style",  label: "Style" },
+  ];
+
+  const activeFilterCount =
+    (filters.bigs ? 1 : 0) +
+    (filters.mids ? 1 : 0) +
+    (filters.attrCats ? 1 : 0);
+
   return (
     <div style={{
       position: "absolute", top: pos.y, left: pos.x,
-      width: 268,
-      maxHeight: "calc(100vh - 120px)",
-      overflowY: "auto",
+      width: 276,
+      maxHeight: "calc(100vh - 140px)",
+      overflow: "hidden", display: "flex", flexDirection: "column",
       background: "rgba(10,10,15,0.94)",
       border: `1px solid ${T.borderHi}`,
       borderRadius: T.r_md,
-      padding: "0 0 6px",
       zIndex: 10,
-      boxShadow: "0 6px 24px rgba(0,0,0,0.5)",
-      backdropFilter: "blur(6px)",
-      WebkitBackdropFilter: "blur(6px)",
+      boxShadow: "0 8px 32px rgba(0,0,0,0.6)",
+      backdropFilter: "blur(8px)",
+      WebkitBackdropFilter: "blur(8px)",
     }}>
-      {/* Drag handle / title bar */}
+      {/* Drag handle */}
       <div
         onMouseDown={onHeaderMouseDown}
         style={{
           display: "flex", alignItems: "center", justifyContent: "space-between",
-          padding: "7px 10px", cursor: "grab",
+          padding: "8px 12px", cursor: "grab",
           borderBottom: `1px solid ${T.borderHi}`,
           background: "rgba(20,20,30,0.5)",
           userSelect: "none",
           borderTopLeftRadius: T.r_md, borderTopRightRadius: T.r_md,
-          position: "sticky", top: 0, zIndex: 2,
         }}
-        onMouseEnter={e => e.currentTarget.style.background = "rgba(30,30,45,0.6)"}
-        onMouseLeave={e => e.currentTarget.style.background = "rgba(20,20,30,0.5)"}
       >
         <span style={{
-          fontSize: 10, fontFamily: T.fontMono, letterSpacing: ".18em",
+          fontSize: 10, fontFamily: T.fontMono, letterSpacing: ".2em",
           color: T.textSec, textTransform: "uppercase",
-        }}>⋮⋮ controls</span>
+        }}>⋮⋮ hit map</span>
         <span
           onClick={(e) => { e.stopPropagation(); setPos({ x: 16, y: 16 }); }}
           onMouseDown={e => e.stopPropagation()}
@@ -2078,186 +2165,213 @@ function LayerPanel({
             padding: "2px 6px", borderRadius: 3,
             fontFamily: T.fontMono, letterSpacing: ".08em",
           }}
-          onMouseEnter={e => { e.currentTarget.style.color = T.text; }}
-          onMouseLeave={e => { e.currentTarget.style.color = T.textMuted; }}
-        >⟲ position</span>
-      </div>
-
-      {/* ── SHOW ─────────────────────────────────────────────── */}
-      <div style={{
-        padding: "8px 10px 4px", fontSize: 9, letterSpacing: ".14em",
-        color: T.textMuted, textTransform: "uppercase",
-        marginBottom: 2, fontFamily: T.fontMono,
-      }}>show</div>
-      <Toggle on={layers.bigs} label={`${layout.bigLabel} (big)`} color="#A78BFA"
-        onChange={v => setLayers(l => ({ ...l, bigs: v }))} />
-      <Toggle on={layers.mids} label={`${layout.midLabel} (mid)`} color="#60A5FA"
-        onChange={v => setLayers(l => ({ ...l, mids: v, smalls: !v ? false : l.smalls }))} />
-      {layout.hasSmalls && (
-        <Toggle on={layers.smalls} label={`${layout.smallLabel} (small)`} color="#F472B6"
-          disabled={!layers.mids} onChange={v => setLayers(l => ({ ...l, smalls: v }))} />
-      )}
-      {layout.hasAttrs && (
-        <Toggle on={layers.attributes} label="Attributes cloud" color="#2DD4BF"
-          onChange={v => setLayers(l => ({ ...l, attributes: v }))} />
-      )}
-
-      {/* ── LABELS ───────────────────────────────────────────── */}
-      <SectionLabel>labels</SectionLabel>
-      <Toggle on={labelOpts.bigLabels} label={`${layout.bigLabel} names`} color="#A78BFA"
-        onChange={v => setLabelOpts(o => ({ ...o, bigLabels: v }))} />
-
-      {/* ── SIZE ─────────────────────────────────────────────── */}
-      <SectionLabel action={
-        <span
-          onClick={() => setNodeSizes({ big: 1, mid: 1, small: 1, attr: 1 })}
-          style={{ fontSize: 9, color: T.textMuted, cursor: "pointer",
-                   fontFamily: T.fontMono, letterSpacing: ".1em" }}
           onMouseEnter={e => e.currentTarget.style.color = T.text}
           onMouseLeave={e => e.currentTarget.style.color = T.textMuted}
-        >reset</span>
-      }>size</SectionLabel>
-      <Slider label={`${layout.bigLabel} size`} value={nodeSizes.big}
-        min={0.3} max={3} step={0.1} formatValue={multFmt}
-        onChange={v => setNodeSizes(s => ({ ...s, big: v }))} />
-      <Slider label={`${layout.midLabel} size`} value={nodeSizes.mid}
-        min={0.3} max={3} step={0.1} formatValue={multFmt}
-        disabled={!layers.mids}
-        onChange={v => setNodeSizes(s => ({ ...s, mid: v }))} />
-      {layout.hasSmalls && (
-        <Slider label={`${layout.smallLabel} size`} value={nodeSizes.small}
-          min={0.3} max={3} step={0.1} formatValue={multFmt}
-          disabled={!layers.smalls}
-          onChange={v => setNodeSizes(s => ({ ...s, small: v }))} />
-      )}
-      {layout.hasAttrs && (
-        <Slider label="Attribute size" value={nodeSizes.attr}
-          min={0.3} max={3} step={0.1} formatValue={multFmt}
-          disabled={!layers.attributes}
-          onChange={v => setNodeSizes(s => ({ ...s, attr: v }))} />
-      )}
+        >⟲</span>
+      </div>
 
-      {/* ── SEARCH ──────────────────────────────────────────── */}
-      <SectionLabel>search</SectionLabel>
-      <SearchBox
-        value={search}
-        onChange={setSearch}
-        results={searchResults}
-        onResultClick={onSearchResultClick}
-      />
-
-      {/* ── FILTER ─────────────────────────────────────────── */}
-      <SectionLabel action={
-        (filters.bigs || filters.mids) ? (
-          <span
-            onClick={() => setFilters(f => ({ ...f, bigs: null, mids: null }))}
-            style={{
-              fontSize: 9, color: T.textMuted, cursor: "pointer",
-              fontFamily: T.fontMono, letterSpacing: ".1em",
-            }}
-            onMouseEnter={e => e.currentTarget.style.color = T.text}
-            onMouseLeave={e => e.currentTarget.style.color = T.textMuted}
-          >clear</span>
-        ) : null
-      }>filter {layout.bigLabel.toLowerCase()}s</SectionLabel>
-      <MultiSelectList
-        items={bigItems}
-        selected={filters.bigs}
-        onChange={setBigsFilter}
-        maxHeight={160}
-        query={bigQuery}
-        onQuery={setBigQuery}
-      />
-
-      {layers.mids && (
-        <>
-          <SectionLabel>filter {layout.midLabel.toLowerCase()}s</SectionLabel>
-          <MultiSelectList
-            items={midItems}
-            selected={filters.mids}
-            onChange={setMidsFilter}
-            maxHeight={180}
-            query={midQuery}
-            onQuery={setMidQuery}
-          />
-        </>
-      )}
-
-      {/* ── ATTRIBUTES ──────────────────────────────────────── */}
-      {layout.hasAttrs && (
-        <>
-          <SectionLabel>attributes</SectionLabel>
-          <AttrCategoryChips layout={layout} filters={filters} setFilters={setFilters} />
-        </>
-      )}
-
-      {/* ── CONNECTIONS ─────────────────────────────────────── */}
-      <SectionLabel>connections</SectionLabel>
-      <SegmentedControl value={linesMode} onChange={setLinesMode} options={[
-        { value: "off",  label: "off" },
-        { value: "auto", label: "auto" },
-        { value: "on",   label: "on" },
-      ]} />
-      <Slider label="Focus edges" value={lineOpacity}
-        min={0} max={1} step={0.05} formatValue={pctFmt}
-        disabled={linesMode === "off"}
-        onChange={setLineOpacity} />
-      <Slider label="All edges (ON mode)" value={allLinesOpacity}
-        min={0} max={1} step={0.02} formatValue={pctFmt}
-        disabled={linesMode !== "on"}
-        onChange={setAllLinesOpacity} />
-
-      {/* ── MOTION ──────────────────────────────────────────── */}
-      <SectionLabel>motion</SectionLabel>
-      <Toggle on={autoRotate} label="Auto-rotate" color="#FACC15"
-        onChange={setAutoRotate} />
-      <Slider label="Speed" value={rotateSpeed}
-        min={0.1} max={3} step={0.1} formatValue={multFmt}
-        disabled={!autoRotate}
-        onChange={setRotateSpeed} />
-
-      {/* ── BACKGROUND ──────────────────────────────────────── */}
-      <SectionLabel>background</SectionLabel>
-      <Toggle on={bgStars.on} label="Star field" color="#E5E7EB"
-        onChange={v => setBgStars(b => ({ ...b, on: v }))} />
-      <Slider label="Density" value={bgStars.count}
-        min={0} max={5000} step={100} formatValue={v => Math.round(v)}
-        disabled={!bgStars.on}
-        onChange={v => setBgStars(b => ({ ...b, count: v }))} />
-      <Slider label="Drift speed" value={bgStars.speed}
-        min={0} max={1} step={0.05} formatValue={multFmt}
-        disabled={!bgStars.on}
-        onChange={v => setBgStars(b => ({ ...b, speed: v }))} />
-
-      {/* ── LIGHTING ────────────────────────────────────────── */}
-      <SectionLabel>lighting</SectionLabel>
-      <Slider label="Glow intensity" value={glowIntensity}
-        min={0} max={2} step={0.1} formatValue={multFmt}
-        onChange={setGlowIntensity} />
-
-      {/* ── RESET ───────────────────────────────────────────── */}
+      {/* Tabs */}
       <div style={{
-        marginTop: 10, padding: "8px 10px", borderTop: `1px solid ${T.borderHi}`,
+        display: "flex", borderBottom: `1px solid ${T.borderHi}`,
       }}>
-        <div
-          onClick={onResetCustomization}
-          style={{
-            textAlign: "center", padding: "6px 8px",
-            border: `1px solid ${T.borderHi}`, borderRadius: 4,
-            fontSize: 10, fontFamily: T.fontMono,
-            color: T.textMuted, letterSpacing: ".08em",
-            cursor: "pointer", userSelect: "none",
-            textTransform: "uppercase",
-          }}
-          onMouseEnter={e => {
-            e.currentTarget.style.color = T.text;
-            e.currentTarget.style.borderColor = T.accent;
-          }}
-          onMouseLeave={e => {
-            e.currentTarget.style.color = T.textMuted;
-            e.currentTarget.style.borderColor = T.borderHi;
-          }}
-        >↺ reset all customization</div>
+        {tabs.map(t => {
+          const on = tab === t.id;
+          const badge = t.id === "filter" && activeFilterCount > 0 ? activeFilterCount : null;
+          return (
+            <div
+              key={t.id}
+              onClick={() => setTab(t.id)}
+              style={{
+                flex: 1, textAlign: "center", padding: "9px 0",
+                cursor: "pointer", userSelect: "none",
+                fontSize: 10, fontFamily: T.fontMono,
+                letterSpacing: ".14em", textTransform: "uppercase",
+                color: on ? T.text : T.textMuted,
+                background: on ? "rgba(94,106,210,0.12)" : "transparent",
+                borderBottom: on ? `2px solid ${T.accent}` : "2px solid transparent",
+                transition: "color 120ms, background 120ms",
+                position: "relative",
+              }}
+              onMouseEnter={e => { if (!on) e.currentTarget.style.color = T.textSec; }}
+              onMouseLeave={e => { if (!on) e.currentTarget.style.color = T.textMuted; }}
+            >
+              {t.label}
+              {badge != null && (
+                <span style={{
+                  position: "absolute", top: 4, right: 10,
+                  fontSize: 8, fontWeight: 700,
+                  background: T.accent, color: "#fff",
+                  padding: "1px 5px", borderRadius: 6,
+                  letterSpacing: 0,
+                }}>{badge}</span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Tab content (scrollable) */}
+      <div style={{ flex: 1, overflowY: "auto", padding: "2px 0 8px" }}>
+
+      {tab === "view" && (
+        <>
+          <SectionLabel>layers</SectionLabel>
+          <Toggle on={layers.bigs} label={`${layout.bigLabel} (big)`} color="#A78BFA"
+            onChange={v => setLayers(l => ({ ...l, bigs: v }))} />
+          <Toggle on={layers.mids} label={`${layout.midLabel} (mid)`} color="#60A5FA"
+            onChange={v => setLayers(l => ({ ...l, mids: v, smalls: !v ? false : l.smalls }))} />
+          {layout.hasSmalls && (
+            <Toggle on={layers.smalls} label={`${layout.smallLabel} (small)`} color="#F472B6"
+              disabled={!layers.mids} onChange={v => setLayers(l => ({ ...l, smalls: v }))} />
+          )}
+          {layout.hasAttrs && (
+            <Toggle on={layers.attributes} label="Attributes cloud" color="#2DD4BF"
+              onChange={v => setLayers(l => ({ ...l, attributes: v }))} />
+          )}
+
+          <SectionLabel>labels</SectionLabel>
+          <Toggle on={labelOpts.bigLabels} label={`${layout.bigLabel} names`} color="#A78BFA"
+            onChange={v => setLabelOpts(o => ({ ...o, bigLabels: v }))} />
+
+          <SectionLabel action={
+            <span
+              onClick={() => setNodeSizes({ big: 1, mid: 1, small: 1, attr: 1 })}
+              style={{ fontSize: 9, color: T.textMuted, cursor: "pointer",
+                      fontFamily: T.fontMono, letterSpacing: ".1em" }}
+              onMouseEnter={e => e.currentTarget.style.color = T.text}
+              onMouseLeave={e => e.currentTarget.style.color = T.textMuted}
+            >reset</span>
+          }>size</SectionLabel>
+          <Slider label={layout.bigLabel} value={nodeSizes.big}
+            min={0.3} max={3} step={0.1} formatValue={multFmt}
+            onChange={v => setNodeSizes(s => ({ ...s, big: v }))} />
+          <Slider label={layout.midLabel} value={nodeSizes.mid}
+            min={0.3} max={3} step={0.1} formatValue={multFmt}
+            disabled={!layers.mids}
+            onChange={v => setNodeSizes(s => ({ ...s, mid: v }))} />
+          {layout.hasSmalls && (
+            <Slider label={layout.smallLabel} value={nodeSizes.small}
+              min={0.3} max={3} step={0.1} formatValue={multFmt}
+              disabled={!layers.smalls}
+              onChange={v => setNodeSizes(s => ({ ...s, small: v }))} />
+          )}
+          {layout.hasAttrs && (
+            <Slider label="Attributes" value={nodeSizes.attr}
+              min={0.3} max={3} step={0.1} formatValue={multFmt}
+              disabled={!layers.attributes}
+              onChange={v => setNodeSizes(s => ({ ...s, attr: v }))} />
+          )}
+        </>
+      )}
+
+      {tab === "filter" && (
+        <>
+          <SectionLabel>search</SectionLabel>
+          <SearchBox
+            value={search}
+            onChange={setSearch}
+            results={searchResults}
+            onResultClick={onSearchResultClick}
+          />
+
+          <SectionLabel action={
+            (filters.bigs || filters.mids) ? (
+              <span
+                onClick={() => setFilters(f => ({ ...f, bigs: null, mids: null }))}
+                style={{
+                  fontSize: 9, color: T.textMuted, cursor: "pointer",
+                  fontFamily: T.fontMono, letterSpacing: ".1em",
+                }}
+                onMouseEnter={e => e.currentTarget.style.color = T.text}
+                onMouseLeave={e => e.currentTarget.style.color = T.textMuted}
+              >clear</span>
+            ) : null
+          }>{layout.bigLabel.toLowerCase()}s</SectionLabel>
+          <MultiSelectList
+            items={bigItems}
+            selected={filters.bigs}
+            onChange={setBigsFilter}
+            maxHeight={150}
+            query={bigQuery}
+            onQuery={setBigQuery}
+          />
+
+          {layers.mids && (
+            <>
+              <SectionLabel>{layout.midLabel.toLowerCase()}s</SectionLabel>
+              <MultiSelectList
+                items={midItems}
+                selected={filters.mids}
+                onChange={setMidsFilter}
+                maxHeight={170}
+                query={midQuery}
+                onQuery={setMidQuery}
+              />
+            </>
+          )}
+
+          {layout.hasAttrs && (
+            <>
+              <SectionLabel>attributes</SectionLabel>
+              <AttrCategoryChips layout={layout} filters={filters} setFilters={setFilters} />
+            </>
+          )}
+        </>
+      )}
+
+      {tab === "style" && (
+        <>
+          <SectionLabel>connections</SectionLabel>
+          <SegmentedControl value={linesMode} onChange={setLinesMode} options={[
+            { value: "off",  label: "off" },
+            { value: "auto", label: "auto" },
+            { value: "on",   label: "on" },
+          ]} />
+          <Slider label="Focus edges" value={lineOpacity}
+            min={0} max={1} step={0.05} formatValue={pctFmt}
+            disabled={linesMode === "off"}
+            onChange={setLineOpacity} />
+          <Slider label="All edges" value={allLinesOpacity}
+            min={0} max={1} step={0.02} formatValue={pctFmt}
+            disabled={linesMode !== "on"}
+            onChange={setAllLinesOpacity} />
+
+          <SectionLabel>rotation</SectionLabel>
+          <Slider label="Speed" value={rotateSpeed}
+            min={0.1} max={3} step={0.1} formatValue={multFmt}
+            onChange={setRotateSpeed} />
+
+          <SectionLabel>lighting</SectionLabel>
+          <Slider label="Glow intensity" value={glowIntensity}
+            min={0} max={2} step={0.1} formatValue={multFmt}
+            onChange={setGlowIntensity} />
+
+          <div style={{
+            marginTop: 12, padding: "8px 10px", borderTop: `1px solid ${T.borderHi}`,
+          }}>
+            <div
+              onClick={onResetCustomization}
+              style={{
+                textAlign: "center", padding: "7px 8px",
+                border: `1px solid ${T.borderHi}`, borderRadius: 4,
+                fontSize: 10, fontFamily: T.fontMono,
+                color: T.textMuted, letterSpacing: ".12em",
+                cursor: "pointer", userSelect: "none",
+                textTransform: "uppercase",
+              }}
+              onMouseEnter={e => {
+                e.currentTarget.style.color = T.text;
+                e.currentTarget.style.borderColor = T.accent;
+              }}
+              onMouseLeave={e => {
+                e.currentTarget.style.color = T.textMuted;
+                e.currentTarget.style.borderColor = T.borderHi;
+              }}
+            >↺ reset style</div>
+          </div>
+        </>
+      )}
+
       </div>
     </div>
   );
@@ -2305,24 +2419,61 @@ function FocusHUD({ focused, onClear, layout }) {
 }
 
 function ResetViewButton({ onReset, hasFocus }) {
-  // Only show when there's something worth resetting from.
-  // (No focus AND no camera drift means the button is noise.)
   return (
     <div
       onClick={onReset}
       title="Reset view (Esc)"
       style={{
-        position: "absolute", bottom: 16, left: "50%", transform: "translateX(-50%)",
+        position: "absolute", bottom: 20, left: "50%", transform: "translateX(-50%)",
         background: "rgba(10,10,15,0.92)", border: `1px solid ${T.borderHi}`,
-        borderRadius: T.r_sm, padding: "6px 14px", cursor: "pointer",
-        color: T.textSec, fontSize: 10, fontFamily: T.fontMono,
-        letterSpacing: ".14em", textTransform: "uppercase", userSelect: "none",
-        zIndex: 10, transition: "color 120ms, border-color 120ms",
+        borderRadius: T.r_md, padding: "10px 22px", cursor: "pointer",
+        color: T.textSec, fontSize: 13, fontFamily: T.fontMono, fontWeight: 500,
+        letterSpacing: ".18em", textTransform: "uppercase", userSelect: "none",
+        zIndex: 10, transition: "color 120ms, border-color 120ms, transform 120ms",
+        boxShadow: "0 4px 16px rgba(0,0,0,0.4)",
       }}
-      onMouseEnter={e => { e.currentTarget.style.color = T.text; e.currentTarget.style.borderColor = T.text; }}
-      onMouseLeave={e => { e.currentTarget.style.color = T.textSec; e.currentTarget.style.borderColor = T.borderHi; }}
+      onMouseEnter={e => {
+        e.currentTarget.style.color = T.text;
+        e.currentTarget.style.borderColor = T.accent;
+        e.currentTarget.style.transform = "translateX(-50%) scale(1.04)";
+      }}
+      onMouseLeave={e => {
+        e.currentTarget.style.color = T.textSec;
+        e.currentTarget.style.borderColor = T.borderHi;
+        e.currentTarget.style.transform = "translateX(-50%) scale(1)";
+      }}
     >
       ⟲ reset view
+    </div>
+  );
+}
+
+// Standalone floating auto-rotate toggle. Sits next to the reset button,
+// away from the controls panel — since rotating the map is a primary
+// interaction, not a configuration option.
+function AutoRotateButton({ on, onToggle }) {
+  return (
+    <div
+      onClick={onToggle}
+      title={on ? "Auto-rotate on (click to pause)" : "Auto-rotate off (click to resume)"}
+      style={{
+        position: "absolute", bottom: 20, right: 24,
+        background: "rgba(10,10,15,0.92)", border: `1px solid ${on ? T.accent : T.borderHi}`,
+        borderRadius: "50%", width: 46, height: 46,
+        display: "flex", alignItems: "center", justifyContent: "center",
+        cursor: "pointer", userSelect: "none", zIndex: 10,
+        boxShadow: "0 4px 16px rgba(0,0,0,0.4)",
+        transition: "border-color 140ms, transform 140ms",
+      }}
+      onMouseEnter={e => { e.currentTarget.style.transform = "scale(1.08)"; }}
+      onMouseLeave={e => { e.currentTarget.style.transform = "scale(1)"; }}
+    >
+      <span style={{
+        fontSize: 18, color: on ? T.accent : T.textMuted,
+        animation: on ? "hi-spin 2s linear infinite" : "none",
+        display: "inline-block",
+      }}>↻</span>
+      <style>{`@keyframes hi-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
     </div>
   );
 }
@@ -2382,7 +2533,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
   const [focused, setFocused] = useState(null);
   const [hovered, setHovered] = useState(null);
   const [linesMode, setLinesMode] = useState("auto");   // "off" | "auto" | "on"
-  const [autoRotate, setAutoRotate] = useState(false);
+  const [autoRotate, setAutoRotate] = useState(true);
   const [interacting, setInteracting] = useState(false);
   const [resetCount, setResetCount] = useState(0);
 
@@ -2420,7 +2571,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
       attributes: layout.hasAttrs,
     });
     setLinesMode("auto");
-    setAutoRotate(false);
+    setAutoRotate(true);
     setFilters({ bigs: null, mids: null, attrCats: null });
     setSearch("");
   }, [categoryId, layout.hasSmalls, layout.hasAttrs]);
@@ -2539,18 +2690,29 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
     else selectAttr(item.node);
   };
 
-  const onControlsStart = () => {
+  // Pause auto-rotate only on actual drag (pointer down), NOT on scroll/wheel.
+  // OrbitControls' start/end events fire for zoom-wheel too, which is annoying
+  // when user just wants to zoom without losing the rotation.
+  const onCanvasPointerDown = (e) => {
+    // Left click or any touch triggers drag. Right-click / middle-click pass through.
+    if (e.button !== 0 && e.pointerType !== "touch") return;
     setInteracting(true);
     if (interactionTimer.current) clearTimeout(interactionTimer.current);
   };
-  const onControlsEnd = () => {
+  const onCanvasPointerUp = () => {
     if (interactionTimer.current) clearTimeout(interactionTimer.current);
-    interactionTimer.current = setTimeout(() => setInteracting(false), 2500);
+    interactionTimer.current = setTimeout(() => setInteracting(false), 1500);
   };
 
   return (
-    <div style={{ position: "relative", width: "100%", height: "calc(100vh - 80px)", minHeight: 500, background: "radial-gradient(ellipse at center, #0A0A14 0%, #04040B 70%)", overflow: "hidden" }}>
-      <Canvas camera={{ position: [0, 15, 130], fov: 50, near: 0.1, far: 800 }} dpr={[1, 2]} onPointerMissed={() => setFocused(null)}>
+    <div style={{ position: "relative", width: "100%", height: "calc(100vh - 56px)", minHeight: 500, background: "radial-gradient(ellipse at center, #0A0A14 0%, #04040B 70%)", overflow: "hidden" }}>
+      <Canvas
+        camera={{ position: [0, 15, 130], fov: 50, near: 0.1, far: 800 }}
+        dpr={[1, 2]}
+        onPointerMissed={() => setFocused(null)}
+        onPointerDown={onCanvasPointerDown}
+        onPointerUp={onCanvasPointerUp}
+      >
         <color attach="background" args={["#04040B"]} />
         <ambientLight intensity={0.36 * glowIntensity} />
         <pointLight position={[0, 0, 0]} intensity={0.7 * glowIntensity} distance={260} color="#9aa8ff" />
@@ -2558,7 +2720,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
 
         <Suspense fallback={null}>
           {bgStars.on && bgStars.count > 0 && (
-            <Stars radius={300} depth={90} count={bgStars.count} factor={4} saturation={0} fade speed={bgStars.speed} />
+            <Stars radius={300} depth={90} count={bgStars.count} factor={6} saturation={0.15} fade speed={bgStars.speed} />
           )}
 
           {layers.bigs && (
@@ -2588,15 +2750,13 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
         </Suspense>
 
         <OrbitControls ref={controlsRef} enableDamping dampingFactor={0.07} minDistance={2} maxDistance={260} rotateSpeed={0.55} zoomSpeed={0.9} panSpeed={0.6}
-          autoRotate={autoRotate && !interacting} autoRotateSpeed={rotateSpeed}
-          onStart={onControlsStart} onEnd={onControlsEnd} />
+          autoRotate={autoRotate && !interacting} autoRotateSpeed={rotateSpeed} />
         <CameraRig focusTarget={focused} resetCount={resetCount} controlsRef={controlsRef} />
       </Canvas>
 
       <LayerPanel
         layers={layers} setLayers={setLayers} layout={layout}
         linesMode={linesMode} setLinesMode={setLinesMode}
-        autoRotate={autoRotate} setAutoRotate={setAutoRotate}
         filters={filters} setFilters={setFilters}
         search={search} setSearch={setSearch}
         searchResults={searchResults}
@@ -2606,12 +2766,12 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
         lineOpacity={lineOpacity} setLineOpacity={setLineOpacity}
         allLinesOpacity={allLinesOpacity} setAllLinesOpacity={setAllLinesOpacity}
         rotateSpeed={rotateSpeed} setRotateSpeed={setRotateSpeed}
-        bgStars={bgStars} setBgStars={setBgStars}
         glowIntensity={glowIntensity} setGlowIntensity={setGlowIntensity}
         onResetCustomization={handleResetCustomization}
       />
       <StatsBadge layout={layout} focused={focused} />
       <ResetViewButton onReset={handleReset} hasFocus={!!focused || !!filters.bigs || !!filters.mids || !!filters.attrCats} />
+      <AutoRotateButton on={autoRotate} onToggle={() => setAutoRotate(v => !v)} />
       <FocusHUD focused={focused} onClear={() => setFocused(null)} layout={layout} />
     </div>
   );
