@@ -3506,32 +3506,177 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
   }, [focused, search]);
 
   // ── Visible lists (filters applied) ──────────────────────────────
+  // ── Focus override sets ──────────────────────────────────────────
+  // When a node is focused, its related neighbourhood (parents,
+  // children, attrs) should remain visible even when filters would
+  // normally hide them — otherwise the focus view shows lines leading
+  // to empty space where the hidden node WOULD be. Keys:
+  //   bigs  → Set of big names
+  //   mids  → Set of "parent/name"
+  //   smalls → Set of smallKey(s)
+  //   attrs → Set of "categoryId:name"
+  const focusOverride = useMemo(() => {
+    if (!focused) return null;
+    const bigs = new Set();
+    const mids = new Set();
+    const smalls = new Set();
+    const attrs = new Set();
+
+    if (focused.kind === "big") {
+      bigs.add(focused.name);
+      for (const m of layout.mids) {
+        if (m.parent === focused.name) {
+          mids.add(`${m.parent}/${m.name}`);
+          if (layout.midToAttrs) {
+            (layout.midToAttrs(m) || []).forEach(r => {
+              if (r?.node) attrs.add(`${r.node.categoryId}:${r.node.name}`);
+            });
+          }
+        }
+      }
+      for (const s of layout.smalls) {
+        if (s.grandparent === focused.name) smalls.add(smallKey(s));
+      }
+      if (layout.bigAttrEdges) {
+        (layout.bigAttrEdges(focused) || []).forEach(r => {
+          if (r?.node) attrs.add(`${r.node.categoryId}:${r.node.name}`);
+        });
+      }
+    } else if (focused.kind === "mid") {
+      bigs.add(focused.parent);
+      mids.add(`${focused.parent}/${focused.name}`);
+      for (const s of layout.smalls) {
+        if (s.parent === focused.name && s.grandparent === focused.parent) smalls.add(smallKey(s));
+      }
+      if (layout.midToAttrs) {
+        (layout.midToAttrs(focused) || []).forEach(r => {
+          if (r?.node) attrs.add(`${r.node.categoryId}:${r.node.name}`);
+        });
+      }
+    } else if (focused.kind === "small") {
+      bigs.add(focused.grandparent);
+      mids.add(`${focused.grandparent}/${focused.parent}`);
+      smalls.add(smallKey(focused));
+      if (layout.midToAttrs) {
+        const parent = layout.midsByKey?.[focused.parent + "/" + focused.grandparent] ||
+          layout.mids.find(m => m.name === focused.parent && m.parent === focused.grandparent);
+        if (parent) {
+          (layout.midToAttrs(parent) || []).slice(0, 3).forEach(r => {
+            if (r?.node) attrs.add(`${r.node.categoryId}:${r.node.name}`);
+          });
+        }
+      }
+    } else if (focused.kind === "attribute") {
+      attrs.add(`${focused.categoryId}:${focused.name}`);
+      // Complement attrs (cross-attr relations from complTable)
+      const cat = ATTR_CAT_BY_ID[focused.categoryId];
+      if (cat && cat.complTable && layout.data) {
+        const table = layout.data[cat.complTable] || {};
+        const entry = table[focused.name];
+        if (entry && typeof entry === "object") {
+          Object.entries(entry).forEach(([field, values]) => {
+            const tgt = COMP_FIELD_TO_CAT[field];
+            if (!tgt || !Array.isArray(values)) return;
+            values.forEach(val => attrs.add(`${tgt}:${val}`));
+          });
+        }
+      }
+      // Mids that reference this attr
+      if (layout.attrToMids) {
+        (layout.attrToMids(focused, 15) || []).forEach(m => {
+          mids.add(`${m.parent}/${m.name}`);
+          bigs.add(m.parent);
+        });
+      }
+    }
+    return { bigs, mids, smalls, attrs };
+  }, [focused, layout]);
+
+  // ── Visible lists (filters applied, with focus overrides) ────────
   const visibleBigs = useMemo(() => {
     if (!filters.bigs) return layout.bigs;
-    return layout.bigs.filter(b => filters.bigs.has(b.name));
-  }, [layout.bigs, filters.bigs]);
+    return layout.bigs.filter(b =>
+      filters.bigs.has(b.name) || focusOverride?.bigs.has(b.name)
+    );
+  }, [layout.bigs, filters.bigs, focusOverride]);
 
   const visibleMids = useMemo(() => {
-    let mids = layout.mids;
-    if (filters.bigs) mids = mids.filter(m => filters.bigs.has(m.parent));
-    if (filters.mids) mids = mids.filter(m => filters.mids.has(m.name));
-    return mids;
-  }, [layout.mids, filters.bigs, filters.mids]);
+    const keep = (m) => {
+      if (filters.bigs && !filters.bigs.has(m.parent) &&
+          !focusOverride?.mids.has(`${m.parent}/${m.name}`)) return false;
+      if (filters.mids && !filters.mids.has(m.name) &&
+          !focusOverride?.mids.has(`${m.parent}/${m.name}`)) return false;
+      return true;
+    };
+    return layout.mids.filter(keep);
+  }, [layout.mids, filters.bigs, filters.mids, focusOverride]);
 
   const visibleSmalls = useMemo(() => {
-    let smalls = layout.smalls;
-    if (filters.bigs)   smalls = smalls.filter(s => filters.bigs.has(s.grandparent));
-    if (filters.mids)   smalls = smalls.filter(s => filters.mids.has(s.parent));
-    if (filters.smalls) smalls = smalls.filter(s => filters.smalls.has(smallKey(s)));
-    return smalls;
-  }, [layout.smalls, filters.bigs, filters.mids, filters.smalls]);
+    const keep = (s) => {
+      const sk = smallKey(s);
+      const overrideHit = focusOverride?.smalls.has(sk);
+      if (filters.bigs && !filters.bigs.has(s.grandparent) && !overrideHit) return false;
+      if (filters.mids && !filters.mids.has(s.parent) && !overrideHit) return false;
+      if (filters.smalls && !filters.smalls.has(sk) && !overrideHit) return false;
+      return true;
+    };
+    return layout.smalls.filter(keep);
+  }, [layout.smalls, filters.bigs, filters.mids, filters.smalls, focusOverride]);
 
   const visibleAttributes = useMemo(() => {
-    let arr = layout.attributes;
-    if (filters.attrCats) arr = arr.filter(a => filters.attrCats.has(a.categoryId));
-    if (filters.attrs)    arr = arr.filter(a => filters.attrs.has(attrKey(a)));
-    return arr;
-  }, [layout.attributes, filters.attrCats, filters.attrs]);
+    const keep = (a) => {
+      const ak = attrKey(a);
+      const overrideHit = focusOverride?.attrs.has(ak);
+      if (filters.attrCats && !filters.attrCats.has(a.categoryId) && !overrideHit) return false;
+      if (filters.attrs && !filters.attrs.has(ak) && !overrideHit) return false;
+      return true;
+    };
+    return layout.attributes.filter(keep);
+  }, [layout.attributes, filters.attrCats, filters.attrs, focusOverride]);
+
+  // ── Rendered lists (what actually gets drawn) ─────────────────────
+  // Layer toggles hide a tier entirely, with one exception: the
+  // currently-focused node (plus its direct ancestor chain so focus
+  // context survives). Without this exception, focusing on a small and
+  // then switching off the microstyle layer left the camera orbiting
+  // an invisible point in space — the "I'm around an invisible star"
+  // bug. We also narrow child tiers when their layer is off so a
+  // focus on a big doesn't flood back in all its mids.
+  const renderedBigs = useMemo(() => {
+    if (layers.bigs) return visibleBigs;
+    // Ancestor-only fallback when big layer is off but a descendant is focused
+    if (focused?.kind === "big")   return visibleBigs.filter(b => b.name === focused.name);
+    if (focused?.kind === "mid")   return visibleBigs.filter(b => b.name === focused.parent);
+    if (focused?.kind === "small") return visibleBigs.filter(b => b.name === focused.grandparent);
+    return [];
+  }, [layers.bigs, visibleBigs, focused]);
+
+  const renderedMids = useMemo(() => {
+    if (layers.mids) return visibleMids;
+    if (focused?.kind === "mid") return visibleMids.filter(m => m.name === focused.name && m.parent === focused.parent);
+    if (focused?.kind === "small") return visibleMids.filter(m => m.name === focused.parent && m.parent === focused.grandparent);
+    return [];
+  }, [layers.mids, visibleMids, focused]);
+
+  const renderedSmalls = useMemo(() => {
+    if (!layout.hasSmalls) return [];
+    if (layers.smalls && layers.mids) return visibleSmalls;
+    if (focused?.kind === "small") {
+      return visibleSmalls.filter(s =>
+        s.name === focused.name && s.parent === focused.parent && s.grandparent === focused.grandparent
+      );
+    }
+    return [];
+  }, [layout.hasSmalls, layers.smalls, layers.mids, visibleSmalls, focused]);
+
+  const renderedAttributes = useMemo(() => {
+    if (!layout.hasAttrs) return [];
+    if (layers.attributes) return visibleAttributes;
+    if (focused?.kind === "attribute") {
+      return visibleAttributes.filter(a => a.categoryId === focused.categoryId && a.name === focused.name);
+    }
+    return [];
+  }, [layout.hasAttrs, layers.attributes, visibleAttributes, focused]);
 
   // ── Search index ──────────────────────────────────────────────────
   const searchIndex = useMemo(() => {
@@ -3583,24 +3728,38 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
 
   const allEdges = useMemo(() => {
     const out = [];
-    for (const m of visibleMids) {
+    // Use renderedX so edges are drawn ONLY when both endpoints will
+    // actually show on screen. When a tier's layer toggle is off we
+    // effectively erase every edge that touches that tier (except the
+    // focus lineage, which renderedX keeps alive). Previously edges
+    // were built off visibleX, which ignored layer toggles entirely —
+    // and the result was dozens of "ghost lines" shooting out from
+    // bigs to empty space when user turned mid/small off.
+    const renderedBigNames = new Set(renderedBigs.map(b => b.name));
+    const renderedMidKey  = new Set(renderedMids.map(m => `${m.parent}/${m.name}`));
+    const renderedSmallKey = new Set(renderedSmalls.map(s => smallKey(s)));
+    const renderedAttrKey = new Set(renderedAttributes.map(a => `${a.categoryId}:${a.name}`));
+
+    for (const m of renderedMids) {
       const parent = layout.bigByName?.[m.parent];
-      if (parent?.pos && m.pos && (!filters.bigs || filters.bigs.has(parent.name))) {
-        out.push({
-          from: parent.pos, to: m.pos,
-          color: blendHex(parent.color, m.color),
-          fromNode: { ...parent, kind: "big" }, toNode: { ...m, kind: "mid" },
-        });
-      }
+      if (!parent?.pos || !m.pos) continue;
+      if (!renderedBigNames.has(parent.name)) continue;
+      out.push({
+        from: parent.pos, to: m.pos,
+        color: blendHex(parent.color, m.color),
+        fromNode: { ...parent, kind: "big" }, toNode: { ...m, kind: "mid" },
+      });
     }
-    if (layout.hasSmalls && layers.smalls && layers.mids) {
+    if (layout.hasSmalls && renderedSmalls.length) {
       const midLookup = (sName, gName) =>
         layout.midsByKey?.[sName + "/" + gName] ||
         layout.midsByKey?.[sName] ||
         layout.mids.find(x => x.name === sName && (!gName || x.parent === gName));
-      for (const s of visibleSmalls) {
+      for (const s of renderedSmalls) {
         const parent = midLookup(s.parent, s.grandparent);
-        if (parent?.pos && s.pos) out.push({
+        if (!parent?.pos || !s.pos) continue;
+        if (!renderedMidKey.has(`${parent.parent}/${parent.name}`)) continue;
+        out.push({
           from: parent.pos, to: s.pos,
           color: blendHex(parent.color, s.color),
           fromNode: { ...parent, kind: "mid" }, toNode: { ...s, kind: "small" },
@@ -3617,14 +3776,13 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
     // it, guaranteeing every attr shows a realistic cluster of
     // connections. A small per-big cap adds genre-level connections
     // for attrs that associate aggregated at that level.
-    if (layout.hasAttrs && layers.attributes && visibleAttributes?.length) {
-      const visibleMidKey = new Set(visibleMids.map(m => `${m.parent}/${m.name}`));
+    if (layout.hasAttrs && renderedAttributes.length) {
       const ATTR_EDGE_CAP_MID = 8;   // edges per attr to its referencing mids
       const BIG_ATTR_CAP      = 3;   // additional edges per big's top attrs
       const emittedEdgeKey = new Set();
 
       if (layout.attrToMids) {
-        for (const a of visibleAttributes) {
+        for (const a of renderedAttributes) {
           if (!a.pos) continue;
           // Fetch up to 3× the cap so we have filler when some users are
           // hidden (due to bigs/mids filter state) — we only actually
@@ -3634,7 +3792,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
           for (const u of users) {
             if (drawn >= ATTR_EDGE_CAP_MID) break;
             if (!u?.pos) continue;
-            if (!visibleMidKey.has(`${u.parent}/${u.name}`)) continue;
+            if (!renderedMidKey.has(`${u.parent}/${u.name}`)) continue;
             const ek = `mid/${u.parent}/${u.name}::${a.categoryId}:${a.name}`;
             if (emittedEdgeKey.has(ek)) continue;
             emittedEdgeKey.add(ek);
@@ -3655,16 +3813,15 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
       // visible link to the big node even when they're already
       // connected to several of that big's mids.
       if (layout.bigAttrEdges) {
-        const visibleAttrKeys = new Set(visibleAttributes.map(a => `${a.categoryId}:${a.name}`));
-        const attrByKey = new Map(visibleAttributes.map(a => [`${a.categoryId}:${a.name}`, a]));
-        for (const b of visibleBigs) {
+        const attrByKey = new Map(renderedAttributes.map(a => [`${a.categoryId}:${a.name}`, a]));
+        for (const b of renderedBigs) {
           const bAttrs = layout.bigAttrEdges(b) || [];
           let added = 0;
           for (const { node, cat } of bAttrs) {
             if (added >= BIG_ATTR_CAP) break;
             if (!node?.pos) continue;
             const k = `${node.categoryId}:${node.name}`;
-            if (!visibleAttrKeys.has(k)) continue;
+            if (!renderedAttrKey.has(k)) continue;
             const attrNode = attrByKey.get(k) || node;
             const ek = `big/${b.name}::${k}`;
             if (emittedEdgeKey.has(ek)) continue;
@@ -3681,8 +3838,8 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
         }
       }
 
-      // Final safety net: any visible attr that still has no edge
-      // (very rare — means no referencing mid is visible AND no big
+      // Final safety net: any rendered attr that still has no edge
+      // (very rare — means no referencing mid is rendered AND no big
       // lists it) gets one big-fallback edge so it isn't left
       // completely disconnected.
       const attrHasEdge = new Set();
@@ -3690,13 +3847,64 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
         if (e.toNode?.kind === "attribute") {
           attrHasEdge.add(`${e.toNode.categoryId}:${e.toNode.name}`);
         }
+        if (e.fromNode?.kind === "attribute") {
+          attrHasEdge.add(`${e.fromNode.categoryId}:${e.fromNode.name}`);
+        }
       }
+
+      // Complement edges (attr ↔ attr): two attrs that the complement
+      // tables list as "pair well together" get a line between them.
+      // Essential for categories with `giField: null` (vocalists,
+      // lyrical) — those NEVER appear in any mid's GI entry, so the
+      // per-attr → mid pass above returns nothing for them and they'd
+      // float alone. Complement tables are their only connection
+      // source. We also use these for any attr in other categories
+      // that happened to miss the mid-cap cutoff. Cap per-attr to 3
+      // complements so the map doesn't turn into a web.
+      if (layout.data) {
+        const renderedAttrByKey = new Map(renderedAttributes.map(a => [`${a.categoryId}:${a.name}`, a]));
+        for (const a of renderedAttributes) {
+          if (!a.pos) continue;
+          const cat = ATTR_CAT_BY_ID[a.categoryId];
+          if (!cat?.complTable) continue;
+          const table = layout.data[cat.complTable] || {};
+          const entry = table[a.name];
+          if (!entry || typeof entry !== "object") continue;
+          let added = 0;
+          for (const [field, values] of Object.entries(entry)) {
+            if (added >= 3) break;
+            const tgt = COMP_FIELD_TO_CAT[field];
+            if (!tgt || !Array.isArray(values)) continue;
+            for (const val of values) {
+              if (added >= 3) break;
+              const otherKey = `${tgt}:${val}`;
+              const other = renderedAttrByKey.get(otherKey);
+              if (!other?.pos) continue;
+              // Dedup: only draw in one direction (a→other), never both.
+              const ek1 = `cmpl/${a.categoryId}:${a.name}::${otherKey}`;
+              const ek2 = `cmpl/${otherKey}::${a.categoryId}:${a.name}`;
+              if (emittedEdgeKey.has(ek1) || emittedEdgeKey.has(ek2)) continue;
+              emittedEdgeKey.add(ek1);
+              out.push({
+                from: a.pos, to: other.pos,
+                color: blendHex(a.color, other.color),
+                fromNode: { ...a, kind: "attribute" },
+                toNode:   { ...other, kind: "attribute" },
+              });
+              attrHasEdge.add(`${a.categoryId}:${a.name}`);
+              attrHasEdge.add(otherKey);
+              added++;
+            }
+          }
+        }
+      }
+
       if (layout.bigAttrEdges) {
-        for (const a of visibleAttributes) {
+        for (const a of renderedAttributes) {
           const k = `${a.categoryId}:${a.name}`;
           if (attrHasEdge.has(k)) continue;
           if (!a.pos) continue;
-          for (const b of visibleBigs) {
+          for (const b of renderedBigs) {
             const bAttrs = layout.bigAttrEdges(b) || [];
             const hit = bAttrs.some(r => r.node?.categoryId === a.categoryId && r.node?.name === a.name);
             if (hit) {
@@ -3714,7 +3922,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
       }
     }
     return out;
-  }, [visibleBigs, visibleMids, visibleSmalls, visibleAttributes, layout, layers.smalls, layers.mids, layers.attributes, filters.bigs]);
+  }, [renderedBigs, renderedMids, renderedSmalls, renderedAttributes, layout]);
 
   const selectBig   = b => setFocused({ kind: "big",       name: b.name, pos: b.pos });
   const selectMid   = s => setFocused({ kind: "mid",       name: s.name, parent: s.parent, pos: s.pos });
@@ -3879,42 +4087,42 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
             <Stars radius={300} depth={90} count={bgStars.count} factor={6} saturation={0.15} fade speed={bgStars.speed} />
           )}
 
-          {layers.bigs && (
-            <BigNodes bigs={visibleBigs} focused={focused} layout={layout} onSelect={selectBig} onHover={setHovered} onCopy={copyNodeName}
+          {renderedBigs.length > 0 && (
+            <BigNodes bigs={renderedBigs} focused={focused} layout={layout} onSelect={selectBig} onHover={setHovered} onCopy={copyNodeName}
                       sizeMult={nodeSizes.big} />
           )}
 
-          {layers.mids && (
-            <MidNodes mids={visibleMids} focused={focused} layout={layout} onSelect={selectMid} onHover={setHovered} onCopy={copyNodeName}
+          {renderedMids.length > 0 && (
+            <MidNodes mids={renderedMids} focused={focused} layout={layout} onSelect={selectMid} onHover={setHovered} onCopy={copyNodeName}
                       sizeMult={nodeSizes.mid} relatedMidSet={relatedMidSet} />
           )}
 
-          {layout.hasSmalls && layers.mids && layers.smalls && (
-            <SmallNodes smalls={visibleSmalls} focused={focused} layout={layout} onSelect={selectSmall} onHover={setHovered} onCopy={copyNodeName}
+          {renderedSmalls.length > 0 && (
+            <SmallNodes smalls={renderedSmalls} focused={focused} layout={layout} onSelect={selectSmall} onHover={setHovered} onCopy={copyNodeName}
                         sizeMult={nodeSizes.small} livePosRef={livePosRef} />
           )}
 
-          {layout.hasAttrs && layers.attributes && (
-            <AttributeNodes attributes={visibleAttributes} focused={focused} layout={layout} onSelect={selectAttr} onHover={setHovered} onCopy={copyNodeName}
+          {renderedAttributes.length > 0 && (
+            <AttributeNodes attributes={renderedAttributes} focused={focused} layout={layout} onSelect={selectAttr} onHover={setHovered} onCopy={copyNodeName}
                             sizeMult={nodeSizes.attr} relatedAttrSet={relatedAttrSet} />
           )}
 
           {/* Labels — one NodeLabels instance per tier. Renders independently
               of the meshes so a hidden layer still can't show ghost labels. */}
-          {layers.bigs && labelOpts.big !== "off" && (
-            <NodeLabels items={visibleBigs} mode={labelOpts.big} tier="big"
+          {renderedBigs.length > 0 && labelOpts.big !== "off" && (
+            <NodeLabels items={renderedBigs} mode={labelOpts.big} tier="big"
                         focused={focused} livePosRef={livePosRef} />
           )}
-          {layers.mids && labelOpts.mid !== "off" && (
-            <NodeLabels items={visibleMids} mode={labelOpts.mid} tier="mid"
+          {renderedMids.length > 0 && labelOpts.mid !== "off" && (
+            <NodeLabels items={renderedMids} mode={labelOpts.mid} tier="mid"
                         focused={focused} livePosRef={livePosRef} />
           )}
-          {layout.hasSmalls && layers.mids && layers.smalls && labelOpts.small !== "off" && (
-            <NodeLabels items={visibleSmalls} mode={labelOpts.small} tier="small"
+          {renderedSmalls.length > 0 && labelOpts.small !== "off" && (
+            <NodeLabels items={renderedSmalls} mode={labelOpts.small} tier="small"
                         focused={focused} livePosRef={livePosRef} />
           )}
-          {layout.hasAttrs && layers.attributes && labelOpts.attr !== "off" && (
-            <NodeLabels items={visibleAttributes} mode={labelOpts.attr} tier="attr"
+          {renderedAttributes.length > 0 && labelOpts.attr !== "off" && (
+            <NodeLabels items={renderedAttributes} mode={labelOpts.attr} tier="attr"
                         focused={focused} livePosRef={livePosRef} />
           )}
 
