@@ -1372,7 +1372,7 @@ function isAttrRelated(attr, focused, relatedAttrSet) {
 // One rotating note for a big (genre hub). Kept as its own component so
 // each big has its own ref + useFrame spinning loop. Label sits OUTSIDE
 // the rotating group so text stays horizontal while the note turns.
-function BigNoteNode({ b, focused, sizeMult, showLabel, onSelect, onHover, onCopy }) {
+function BigNoteNode({ b, focused, sizeMult, onSelect, onHover, onCopy }) {
   const spinRef = useRef();
   const sp = useMemo(() => {
     const s = hash01(b.name + "/spin");
@@ -1465,29 +1465,16 @@ function BigNoteNode({ b, focused, sizeMult, showLabel, onSelect, onHover, onCop
           />
         </points>
       </group>
-      {showLabel && (
-        <Html center distanceFactor={34} style={{ pointerEvents: "none" }}>
-          <div style={{
-            color: "#fff", fontSize: isF ? 13 : 11,
-            fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-            fontWeight: isF ? 700 : 500, letterSpacing: "0.02em",
-            background: isF ? "rgba(94,106,210,0.96)" : "rgba(10,10,15,0.78)",
-            padding: "2px 7px", borderRadius: 4, whiteSpace: "nowrap",
-            transform: "translate(-50%, 24px)", position: "absolute",
-            opacity: dim ? 0.4 : 1, userSelect: "none",
-          }}>{b.name}</div>
-        </Html>
-      )}
     </group>
   );
 }
 
-function BigNodes({ bigs, focused, layout, onSelect, onHover, onCopy, sizeMult = 1, showLabel = true }) {
+function BigNodes({ bigs, focused, layout, onSelect, onHover, onCopy, sizeMult = 1 }) {
   return (
     <>
       {bigs.map(b => (
         <BigNoteNode key={b.name} b={b} focused={focused}
-          sizeMult={sizeMult} showLabel={showLabel}
+          sizeMult={sizeMult}
           onSelect={onSelect} onHover={onHover} onCopy={onCopy} />
       ))}
     </>
@@ -2080,22 +2067,173 @@ function EdgeTooltip({ edge, focused }) {
   );
 }
 
-function HoverTooltip({ hovered }) {
-  if (!hovered) return null;
-  const pos = hovered.pos;
-  if (!pos) return null;
+// ── Unified label system ──────────────────────────────────────────
+// One component per tier. Each instance decides which items to label
+// based on the mode: "on" (all), "auto" (within tier threshold), "off"
+// (none). Orbiting smalls have their labels follow the live world
+// position so labels don't dangle where the node *was* at layout time.
+//
+// Performance: in "auto" mode the distance check is throttled to ~6Hz
+// via tickRef, and state updates only happen when the visible set
+// actually changes — so a stable camera doesn't cause per-frame React
+// re-renders. "on" mode with many items (1000+ smalls) renders all
+// <Html> elements, which is expensive — the UI labels that toggle as
+// "auto (recommended)" so users understand the trade-off.
+
+const LABEL_TIER_CFG = {
+  big:   { distanceFactor: 34, yOffset: 24, autoThreshold: Infinity, fontSize: 11 },
+  mid:   { distanceFactor: 22, yOffset: 14, autoThreshold: 55, fontSize: 10 },
+  small: { distanceFactor: 14, yOffset: 9,  autoThreshold: 14, fontSize: 9 },
+  attr:  { distanceFactor: 20, yOffset: 12, autoThreshold: 35, fontSize: 10 },
+};
+
+function smallLiveKey(item) {
+  if (item.grandparent && item.parent && item.name) {
+    return item.grandparent + "/" + item.parent + "/" + item.name;
+  }
+  return null;
+}
+
+function readItemPos(item, livePosRef) {
+  // Smalls orbit — try live ref first; everything else uses static pos.
+  if (livePosRef) {
+    const k = smallLiveKey(item);
+    if (k) {
+      const live = livePosRef.current.get(k);
+      if (live) return live;
+    }
+  }
+  return item.pos;
+}
+
+function labelFocusMatch(item, tier, focused) {
+  if (!focused) return false;
+  if (tier === "big")   return focused.kind === "big"       && focused.name === item.name;
+  if (tier === "mid")   return focused.kind === "mid"       && focused.name === item.name && focused.parent === item.parent;
+  if (tier === "small") return focused.kind === "small"     && focused.name === item.name && focused.parent === item.parent && focused.grandparent === item.grandparent;
+  if (tier === "attr")  return focused.kind === "attribute" && focused.name === item.name && focused.categoryId === item.categoryId;
+  return false;
+}
+
+function labelKeyFor(it, tier, i) {
+  if (tier === "big")   return `b-${it.name}`;
+  if (tier === "mid")   return `m-${it.parent}/${it.name}`;
+  if (tier === "small") return `s-${it.grandparent}/${it.parent}/${it.name}`;
+  if (tier === "attr")  return `a-${it.categoryId}:${it.name}`;
+  return `x-${i}`;
+}
+
+function LiveLabel({ item, tier, focused, livePosRef }) {
+  const groupRef = useRef();
+  const cfg = LABEL_TIER_CFG[tier];
+  useFrame(() => {
+    if (!groupRef.current) return;
+    const p = readItemPos(item, livePosRef);
+    if (p) groupRef.current.position.set(p[0], p[1], p[2]);
+  });
+  const isF = labelFocusMatch(item, tier, focused);
+  const dim = focused && !isF;
   return (
-    <Html position={pos} center distanceFactor={20} style={{ pointerEvents: "none" }}>
-      <div style={{
-        color: "#fff", fontSize: 11, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-        fontWeight: 600, background: "rgba(94,106,210,0.96)",
-        padding: "4px 9px", borderRadius: 4, whiteSpace: "nowrap",
-        transform: "translate(-50%, -30px)", position: "absolute",
-        userSelect: "none", boxShadow: "0 2px 8px rgba(0,0,0,0.5)",
-      }}>
-        {hovered.label || hovered.name}
-      </div>
-    </Html>
+    <group ref={groupRef}>
+      <Html center distanceFactor={cfg.distanceFactor} style={{ pointerEvents: "none" }}>
+        <div style={{
+          color: "#fff",
+          fontSize: isF ? cfg.fontSize + 2 : cfg.fontSize,
+          fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+          fontWeight: isF ? 700 : 500, letterSpacing: "0.02em",
+          background: isF ? "rgba(94,106,210,0.96)" : "rgba(10,10,15,0.78)",
+          padding: "2px 7px", borderRadius: 4, whiteSpace: "nowrap",
+          transform: `translate(-50%, ${cfg.yOffset}px)`, position: "absolute",
+          opacity: dim ? 0.45 : 1, userSelect: "none",
+        }}>{item.label || item.name}</div>
+      </Html>
+    </group>
+  );
+}
+
+function NodeLabels({ items, mode, tier, focused, livePosRef = null }) {
+  const { camera } = useThree();
+  const [visible, setVisible] = useState([]);
+  const tickRef = useRef(0);
+  const tmpVec = useMemo(() => new THREE.Vector3(), []);
+  const cfg = LABEL_TIER_CFG[tier];
+
+  useFrame((_, dt) => {
+    if (mode === "off") {
+      if (visible.length) setVisible([]);
+      return;
+    }
+    if (mode === "on" || !isFinite(cfg.autoThreshold)) {
+      if (visible !== items) setVisible(items);
+      return;
+    }
+    // "auto": throttle the camera-distance check to ~6Hz.
+    tickRef.current += dt;
+    if (tickRef.current < 0.16) return;
+    tickRef.current = 0;
+    const thresh = cfg.autoThreshold;
+    const near = [];
+    for (const it of items) {
+      const p = readItemPos(it, livePosRef);
+      if (!p) continue;
+      tmpVec.set(p[0], p[1], p[2]);
+      if (camera.position.distanceTo(tmpVec) < thresh) near.push(it);
+    }
+    setVisible(prev => {
+      if (prev.length !== near.length) return near;
+      for (let i = 0; i < near.length; i++) if (prev[i] !== near[i]) return near;
+      return prev;
+    });
+  });
+
+  if (mode === "off") return null;
+  return (
+    <>
+      {visible.map((it, i) => (
+        <LiveLabel key={labelKeyFor(it, tier, i)} item={it} tier={tier}
+          focused={focused} livePosRef={livePosRef} />
+      ))}
+    </>
+  );
+}
+
+// HoverTooltip — displays the hovered node's name at its world position.
+// Critical: orbiting smalls rewrite their world position via the shared
+// livePosRef each frame, but the `hovered` prop here only carries the
+// static layout-time `pos`. If we bind Html to `hovered.pos`, the tooltip
+// appears where the node WAS at layout time, not where it actually is —
+// producing the "transparent dot with a floating name" effect the user
+// reported. We wrap Html in a group and update its position per-frame
+// from livePosRef when the hovered node is an orbiting small, so the
+// label tracks the moving body.
+function HoverTooltip({ hovered, livePosRef = null }) {
+  const groupRef = useRef();
+  useFrame(() => {
+    if (!hovered || !groupRef.current) return;
+    let p = hovered.pos;
+    if (livePosRef && hovered.kind === "small" && hovered.grandparent) {
+      const live = livePosRef.current.get(
+        hovered.grandparent + "/" + hovered.parent + "/" + hovered.name
+      );
+      if (live) p = live;
+    }
+    if (p) groupRef.current.position.set(p[0], p[1], p[2]);
+  });
+  if (!hovered || !hovered.pos) return null;
+  return (
+    <group ref={groupRef}>
+      <Html center distanceFactor={20} style={{ pointerEvents: "none" }}>
+        <div style={{
+          color: "#fff", fontSize: 11, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+          fontWeight: 600, background: "rgba(94,106,210,0.96)",
+          padding: "4px 9px", borderRadius: 4, whiteSpace: "nowrap",
+          transform: "translate(-50%, -30px)", position: "absolute",
+          userSelect: "none", boxShadow: "0 2px 8px rgba(0,0,0,0.5)",
+        }}>
+          {hovered.label || hovered.name}
+        </div>
+      </Html>
+    </group>
   );
 }
 
@@ -2105,14 +2243,19 @@ function HoverTooltip({ hovered }) {
 // zoom). Without this cancel, the lerp pulls camera + target back each
 // frame while the user's input is fighting to move them — producing
 // the "stuck, snaps back, works again after a few seconds" symptom.
-function CameraRig({ focusTarget, resetCount, controlsRef, animatingRef }) {
+function CameraRig({ focusTarget, resetCount, controlsRef, animatingRef, syncAnimating }) {
   const { camera } = useThree();
   const destPos = useRef(new THREE.Vector3(0, 15, 130));
   const destTgt = useRef(new THREE.Vector3());
 
-  // Helper: flip animatingRef without crashing if the caller forgot to
-  // wire it up (defensive; keeps the component usable in isolation).
-  const setAnimating = (v) => { if (animatingRef) animatingRef.current = v; };
+  // Flip both the ref (for useFrame's per-tick check) and the React
+  // state (for OrbitControls' autoRotate prop) via the sync callback.
+  // If syncAnimating isn't wired up, fall back to the ref only so the
+  // component stays usable.
+  const setAnimating = (v) => {
+    if (animatingRef) animatingRef.current = v;
+    if (syncAnimating) syncAnimating(v);
+  };
 
   useEffect(() => {
     if (!focusTarget) { setAnimating(false); return; }
@@ -2120,7 +2263,7 @@ function CameraRig({ focusTarget, resetCount, controlsRef, animatingRef }) {
     if (!p) return;
     const t = new THREE.Vector3(...p);
     destTgt.current.copy(t);
-    const dist = focusTarget.kind === "big" ? 12 : focusTarget.kind === "mid" ? 5 : focusTarget.kind === "small" ? 2.5 : 5;
+    const dist = focusTarget.kind === "big" ? 22 : focusTarget.kind === "mid" ? 9 : focusTarget.kind === "small" ? 4.5 : 8;
     const dir = t.length() > 0.01 ? t.clone().normalize() : new THREE.Vector3(0, 0, 1);
     destPos.current.copy(t.clone().add(dir.multiplyScalar(dist)));
     setAnimating(true);
@@ -2142,8 +2285,9 @@ function CameraRig({ focusTarget, resetCount, controlsRef, animatingRef }) {
       controlsRef.current.target.lerp(destTgt.current, k);
       controlsRef.current.update();
     }
-    if (camera.position.distanceTo(destPos.current) < 0.07 && controlsRef.current?.target.distanceTo(destTgt.current) < 0.07)
-      animatingRef.current = false;
+    if (camera.position.distanceTo(destPos.current) < 0.07 && controlsRef.current?.target.distanceTo(destTgt.current) < 0.07) {
+      setAnimating(false);
+    }
   });
   return null;
 }
@@ -2204,6 +2348,49 @@ function SegmentedControl({ value, onChange, options }) {
           textTransform: "uppercase",
         }}>{opt.label}</div>
       ))}
+    </div>
+  );
+}
+
+// Label-mode row: tier name on the left, tiny on/auto/off segmented
+// control on the right. Compact enough to stack four of them in the
+// LABELS section of the VIEW tab. When disabled (because its layer is
+// off), the row dims but remains visible so the user sees the option
+// exists.
+function LabelModeRow({ tierLabel, value, onChange, disabled = false }) {
+  const opts = [
+    { value: "on",   label: "on" },
+    { value: "auto", label: "auto" },
+    { value: "off",  label: "off" },
+  ];
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", gap: 8,
+      margin: "2px 10px 2px",
+      opacity: disabled ? 0.45 : 1,
+    }}>
+      <div style={{
+        flex: 1, minWidth: 0,
+        fontSize: 11, fontFamily: T.fontMono, color: T.textSec,
+        letterSpacing: ".03em",
+        whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+      }}>{tierLabel}</div>
+      <div style={{
+        display: "flex", borderRadius: 4,
+        border: `1px solid ${T.borderHi}`, overflow: "hidden",
+        pointerEvents: disabled ? "none" : "auto",
+      }}>
+        {opts.map(opt => (
+          <div key={opt.value} onClick={() => onChange(opt.value)} style={{
+            padding: "3px 8px",
+            fontSize: 9, fontFamily: T.fontMono, letterSpacing: ".06em",
+            cursor: "pointer", userSelect: "none",
+            background: value === opt.value ? T.borderHi : "transparent",
+            color: value === opt.value ? T.text : T.textMuted,
+            textTransform: "uppercase",
+          }}>{opt.label}</div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -2536,6 +2723,7 @@ function LayerPanel({
 }) {
   const [pos, setPos] = useState({ x: 16, y: 16 });
   const [tab, setTab] = useState("view"); // view | filter | style
+  const [minimized, setMinimized] = useState(false);
   const dragStart = useRef(null);
 
   const onHeaderMouseDown = (e) => {
@@ -2674,29 +2862,47 @@ function LayerPanel({
         style={{
           display: "flex", alignItems: "center", justifyContent: "space-between",
           padding: "8px 12px", cursor: "grab",
-          borderBottom: `1px solid ${T.borderHi}`,
+          borderBottom: minimized ? "none" : `1px solid ${T.borderHi}`,
           background: "rgba(20,20,30,0.5)",
           userSelect: "none",
           borderTopLeftRadius: T.r_md, borderTopRightRadius: T.r_md,
+          borderBottomLeftRadius: minimized ? T.r_md : 0,
+          borderBottomRightRadius: minimized ? T.r_md : 0,
         }}
       >
         <span style={{
           fontSize: 10, fontFamily: T.fontMono, letterSpacing: ".2em",
           color: T.textSec, textTransform: "uppercase",
         }}>⋮⋮ hit map</span>
-        <span
-          onClick={(e) => { e.stopPropagation(); setPos({ x: 16, y: 16 }); }}
-          onMouseDown={e => e.stopPropagation()}
-          style={{
-            fontSize: 9, color: T.textMuted, cursor: "pointer",
-            padding: "2px 6px", borderRadius: 3,
-            fontFamily: T.fontMono, letterSpacing: ".08em",
-          }}
-          onMouseEnter={e => e.currentTarget.style.color = T.text}
-          onMouseLeave={e => e.currentTarget.style.color = T.textMuted}
-        >⟲</span>
+        <div style={{ display: "flex", alignItems: "center", gap: 2 }}>
+          <span
+            onClick={(e) => { e.stopPropagation(); setMinimized(m => !m); }}
+            onMouseDown={e => e.stopPropagation()}
+            title={minimized ? "Expand" : "Minimize"}
+            style={{
+              fontSize: 12, color: T.textMuted, cursor: "pointer",
+              padding: "2px 8px", borderRadius: 3,
+              fontFamily: T.fontMono, lineHeight: 1,
+            }}
+            onMouseEnter={e => e.currentTarget.style.color = T.text}
+            onMouseLeave={e => e.currentTarget.style.color = T.textMuted}
+          >{minimized ? "+" : "−"}</span>
+          <span
+            onClick={(e) => { e.stopPropagation(); setPos({ x: 16, y: 16 }); }}
+            onMouseDown={e => e.stopPropagation()}
+            title="Reset position"
+            style={{
+              fontSize: 9, color: T.textMuted, cursor: "pointer",
+              padding: "2px 6px", borderRadius: 3,
+              fontFamily: T.fontMono, letterSpacing: ".08em",
+            }}
+            onMouseEnter={e => e.currentTarget.style.color = T.text}
+            onMouseLeave={e => e.currentTarget.style.color = T.textMuted}
+          >⟲</span>
+        </div>
       </div>
 
+      {!minimized && (<>
       {/* Tabs */}
       <div style={{
         display: "flex", borderBottom: `1px solid ${T.borderHi}`,
@@ -2757,8 +2963,18 @@ function LayerPanel({
           )}
 
           <SectionLabel>labels</SectionLabel>
-          <Toggle on={labelOpts.bigLabels} label={`${layout.bigLabel} names`} color="#A78BFA"
-            onChange={v => setLabelOpts(o => ({ ...o, bigLabels: v }))} />
+          <LabelModeRow tierLabel={layout.bigLabel}   value={labelOpts.big}
+            onChange={v => setLabelOpts(o => ({ ...o, big: v }))} />
+          <LabelModeRow tierLabel={layout.midLabel}   value={labelOpts.mid}
+            onChange={v => setLabelOpts(o => ({ ...o, mid: v }))} disabled={!layers.mids} />
+          {layout.hasSmalls && (
+            <LabelModeRow tierLabel={layout.smallLabel} value={labelOpts.small}
+              onChange={v => setLabelOpts(o => ({ ...o, small: v }))} disabled={!layers.smalls} />
+          )}
+          {layout.hasAttrs && (
+            <LabelModeRow tierLabel="Attributes" value={labelOpts.attr}
+              onChange={v => setLabelOpts(o => ({ ...o, attr: v }))} disabled={!layers.attributes} />
+          )}
 
           <SectionLabel action={
             <span
@@ -2920,6 +3136,7 @@ function LayerPanel({
       )}
 
       </div>
+      </>)}
     </div>
   );
 }
@@ -3150,7 +3367,12 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
   // All visual parameters are state-driven so the user can tune the map
   // to their preference. Defaults match the pre-customization look.
   const [nodeSizes, setNodeSizes] = useState({ big: 1.0, mid: 1.0, small: 1.0, attr: 1.0 });
-  const [labelOpts, setLabelOpts] = useState({ bigLabels: true });
+  const [labelOpts, setLabelOpts] = useState({
+    big:   "on",    // genres — always on by default (only 18 of them)
+    mid:   "auto",  // subgenres — auto fades to close ones
+    small: "auto",  // microstyles
+    attr:  "auto",  // attributes
+  });
   const [lineOpacity, setLineOpacity] = useState(1.0);   // 0 = invisible, 1 = full
   const [allLinesOpacity, setAllLinesOpacity] = useState(0.22); // base for "on" mode
   const [rotateSpeed, setRotateSpeed] = useState(0.18);  // very slow — full rotation ~5 min
@@ -3158,13 +3380,20 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
 
   const controlsRef = useRef();
   const interactionTimer = useRef(null);
-  // Shared flag so OrbitControls' onStart (drag / wheel-zoom) can cancel
-  // the CameraRig's fly-to-focus lerp. Writing `false` here is sufficient
-  // — CameraRig's useFrame checks this every frame and bails out when
-  // false. Previously `animating` was a private ref inside CameraRig,
-  // which meant user input fought the lerp for the full animation
-  // duration before it would settle.
+  // Paired with a React state — the ref is read in useFrame every tick
+  // (zero re-render cost), the state is what OrbitControls' `autoRotate`
+  // prop reads so React knows to pause the orbit when a lerp is active.
+  // Without the state half, auto-rotate would keep rotating the camera
+  // around the target while the lerp tries to hold it at destPos, and
+  // the two would fight forever — that's what causes the "jitters in
+  // and out" video the user reported.
   const cameraAnimatingRef = useRef(false);
+  const [cameraAnimating, setCameraAnimating] = useState(false);
+  const syncCameraAnimating = (v) => {
+    if (cameraAnimatingRef.current === v) return;
+    cameraAnimatingRef.current = v;
+    setCameraAnimating(v);
+  };
 
   // Right-click-to-copy: writes the clicked node's name to the system
   // clipboard and flashes a small toast so the user knows it worked.
@@ -3394,7 +3623,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
 
   const handleResetCustomization = () => {
     setNodeSizes({ big: 1.0, mid: 1.0, small: 1.0, attr: 1.0 });
-    setLabelOpts({ bigLabels: true });
+    setLabelOpts({ big: "on", mid: "auto", small: "auto", attr: "auto" });
     setLineOpacity(1.0);
     setAllLinesOpacity(0.22);
     setRotateSpeed(0.18);
@@ -3446,7 +3675,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
 
           {layers.bigs && (
             <BigNodes bigs={visibleBigs} focused={focused} layout={layout} onSelect={selectBig} onHover={setHovered} onCopy={copyNodeName}
-                      sizeMult={nodeSizes.big} showLabel={labelOpts.bigLabels} />
+                      sizeMult={nodeSizes.big} />
           )}
 
           {layers.mids && (
@@ -3462,6 +3691,25 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
           {layout.hasAttrs && layers.attributes && (
             <AttributeNodes attributes={visibleAttributes} focused={focused} layout={layout} onSelect={selectAttr} onHover={setHovered} onCopy={copyNodeName}
                             sizeMult={nodeSizes.attr} relatedAttrSet={relatedAttrSet} />
+          )}
+
+          {/* Labels — one NodeLabels instance per tier. Renders independently
+              of the meshes so a hidden layer still can't show ghost labels. */}
+          {layers.bigs && labelOpts.big !== "off" && (
+            <NodeLabels items={visibleBigs} mode={labelOpts.big} tier="big"
+                        focused={focused} livePosRef={livePosRef} />
+          )}
+          {layers.mids && labelOpts.mid !== "off" && (
+            <NodeLabels items={visibleMids} mode={labelOpts.mid} tier="mid"
+                        focused={focused} livePosRef={livePosRef} />
+          )}
+          {layout.hasSmalls && layers.mids && layers.smalls && labelOpts.small !== "off" && (
+            <NodeLabels items={visibleSmalls} mode={labelOpts.small} tier="small"
+                        focused={focused} livePosRef={livePosRef} />
+          )}
+          {layout.hasAttrs && layers.attributes && labelOpts.attr !== "off" && (
+            <NodeLabels items={visibleAttributes} mode={labelOpts.attr} tier="attr"
+                        focused={focused} livePosRef={livePosRef} />
           )}
 
           {linesMode === "on" && (
@@ -3497,7 +3745,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
             focused={focused}
           />}
 
-          <HoverTooltip hovered={hovered} />
+          <HoverTooltip hovered={hovered} livePosRef={livePosRef} />
         </Suspense>
 
         <OrbitControls
@@ -3505,11 +3753,11 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
           enableDamping dampingFactor={0.07}
           minDistance={2} maxDistance={260}
           rotateSpeed={0.55} zoomSpeed={0.9} panSpeed={0.6}
-          autoRotate={autoRotate && !interacting} autoRotateSpeed={rotateSpeed}
-          onStart={() => { cameraAnimatingRef.current = false; }}
+          autoRotate={autoRotate && !interacting && !cameraAnimating} autoRotateSpeed={rotateSpeed}
+          onStart={() => { syncCameraAnimating(false); }}
           mouseButtons={{ LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: null }}
         />
-        <CameraRig focusTarget={focused} resetCount={resetCount} controlsRef={controlsRef} animatingRef={cameraAnimatingRef} />
+        <CameraRig focusTarget={focused} resetCount={resetCount} controlsRef={controlsRef} animatingRef={cameraAnimatingRef} syncAnimating={syncCameraAnimating} />
       </Canvas>
 
       <LayerPanel
