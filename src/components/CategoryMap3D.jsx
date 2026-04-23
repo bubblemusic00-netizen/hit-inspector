@@ -3300,7 +3300,7 @@ function FlightKeysHUD({ pressedKeys }) {
     <div style={{
       position: "absolute", bottom: 60, left: "50%", transform: "translateX(-50%)",
       zIndex: 15, display: "flex", alignItems: "center", gap: 10,
-      background: "rgba(10,10,15,0.80)",
+      background: "rgba(10,10,15,0.82)",
       border: `1px solid ${T.borderHi}`,
       padding: "8px 12px",
       borderRadius: T.r_md, userSelect: "none", pointerEvents: "none",
@@ -3583,17 +3583,10 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
   // know the ref changed (React doesn't observe refs). Keeping them
   // paired lets the ref stay the per-frame read source and the state
   // drive the visual feedback.
-  //
-  // We attach TWO sets of listeners: global (window + document, capture
-  // phase) AND direct on the map's root div via React's onKeyDown.
-  // The root div has tabIndex=0 and auto-focuses on mount. Whichever
-  // path delivers the event first wins — this is defensive redundancy
-  // after reports that keys weren't firing at all, which suggests
-  // something upstream might be eating window events.
   const keyboardMoveRef = useRef(new Set());
   const [pressedKeys, setPressedKeys] = useState("");
   const rootDivRef = useRef(null);
-  const CODE_TO_KEY = useMemo(() => ({
+  const CODE_TO_KEY_MAP = useMemo(() => ({
     KeyW: "w", KeyA: "a", KeyS: "s", KeyD: "d", KeyX: "x", KeyZ: "z",
   }), []);
   const isTextTarget = (t) => {
@@ -3606,7 +3599,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
   };
   const flightKeyDown = (e) => {
     if (isTextTarget(e.target)) return;
-    const mapped = CODE_TO_KEY[e.code];
+    const mapped = CODE_TO_KEY_MAP[e.code];
     if (!mapped) return;
     const before = keyboardMoveRef.current.size;
     keyboardMoveRef.current.add(mapped);
@@ -3614,7 +3607,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
     e.preventDefault();
   };
   const flightKeyUp = (e) => {
-    const mapped = CODE_TO_KEY[e.code];
+    const mapped = CODE_TO_KEY_MAP[e.code];
     if (mapped && keyboardMoveRef.current.has(mapped)) {
       keyboardMoveRef.current.delete(mapped);
       syncPressedKeys();
@@ -3627,15 +3620,19 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
         syncPressedKeys();
       }
     };
+    // Capture-phase on window + document so any upstream handler that
+    // stopPropagation()s on a bubble-phase listener can't starve us.
+    // Belt and suspenders after the user reported that keys weren't
+    // registering. The root div also wires onKeyDown/Up directly, so
+    // whichever delivery path fires first wins.
     const opts = { capture: true };
     window.addEventListener("keydown", flightKeyDown, opts);
     window.addEventListener("keyup", flightKeyUp, opts);
     window.addEventListener("blur", onBlur);
     document.addEventListener("keydown", flightKeyDown, opts);
     document.addEventListener("keyup", flightKeyUp, opts);
-    // Auto-focus the root div so keys route to it from the start —
-    // this makes the onKeyDown on the root fire even without a click
-    // on the map first.
+    // Auto-focus the root div so keys route to it from mount, without
+    // requiring a click on the map first.
     if (rootDivRef.current) {
       try { rootDivRef.current.focus({ preventScroll: true }); } catch {}
     }
@@ -3805,10 +3802,17 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
 
   const visibleMids = useMemo(() => {
     const keep = (m) => {
-      if (filters.bigs && !filters.bigs.has(m.parent) &&
-          !focusOverride?.mids.has(`${m.parent}/${m.name}`)) return false;
-      if (filters.mids && !filters.mids.has(m.name) &&
-          !focusOverride?.mids.has(`${m.parent}/${m.name}`)) return false;
+      const overrideHit = focusOverride?.mids.has(`${m.parent}/${m.name}`);
+      // Own-tier filter wins: if the user explicitly picked mids, only
+      // those pass. Parent-big filter state is irrelevant at this point —
+      // an explicit mid selection shouldn't be hidden just because the
+      // user also turned genres to NONE.
+      if (filters.mids && !filters.mids.has(m.name) && !overrideHit) return false;
+      // Parent-tier gate applies ONLY when the user has NOT made an
+      // explicit mid pick. Otherwise mid-tier filter carries full weight.
+      if (!filters.mids) {
+        if (filters.bigs && !filters.bigs.has(m.parent) && !overrideHit) return false;
+      }
       return true;
     };
     return layout.mids.filter(keep);
@@ -3818,9 +3822,13 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
     const keep = (s) => {
       const sk = smallKey(s);
       const overrideHit = focusOverride?.smalls.has(sk);
-      if (filters.bigs && !filters.bigs.has(s.grandparent) && !overrideHit) return false;
-      if (filters.mids && !filters.mids.has(s.parent) && !overrideHit) return false;
+      // Own-tier filter wins: explicit small pick bypasses parent gates.
       if (filters.smalls && !filters.smalls.has(sk) && !overrideHit) return false;
+      // Parent gates only apply when no explicit small pick is set.
+      if (!filters.smalls) {
+        if (filters.mids && !filters.mids.has(s.parent) && !overrideHit) return false;
+        if (filters.bigs && !filters.bigs.has(s.grandparent) && !overrideHit) return false;
+      }
       return true;
     };
     return layout.smalls.filter(keep);
