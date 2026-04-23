@@ -3663,6 +3663,59 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
           }
         }
       }
+      // Fallback: any visible attribute that STILL has no edge (rank 4+
+      // under every mid it appears in, and outside every big's top-6)
+      // gets one edge via inverse lookup. Without this, those attrs
+      // hang in space at the map periphery as disconnected stars —
+      // exactly the "floating attributes" the user called out in the
+      // last screenshot. Prefers a mid over a big for the connection
+      // since mid→attr is the more specific relationship.
+      const attrHasEdge = new Set();
+      for (const e of out) {
+        if (e.toNode?.kind === "attribute") {
+          attrHasEdge.add(`${e.toNode.categoryId}:${e.toNode.name}`);
+        }
+      }
+      if (layout.attrToMids) {
+        const visibleMidKey = new Set(visibleMids.map(m => `${m.parent}/${m.name}`));
+        for (const a of visibleAttributes) {
+          const k = `${a.categoryId}:${a.name}`;
+          if (attrHasEdge.has(k)) continue;
+          if (!a.pos) continue;
+          const users = layout.attrToMids(a, 10) || [];
+          let linked = false;
+          for (const u of users) {
+            if (!u?.pos) continue;
+            const uk = `${u.parent}/${u.name}`;
+            if (!visibleMidKey.has(uk)) continue;
+            out.push({
+              from: u.pos, to: a.pos,
+              color: blendHex(u.color, a.color),
+              fromNode: { ...u, kind: "mid" },
+              toNode:   { ...a, kind: "attribute" },
+            });
+            linked = true;
+            attrHasEdge.add(k);
+            break;
+          }
+          if (!linked && layout.bigAttrEdges) {
+            for (const b of visibleBigs) {
+              const bAttrs = layout.bigAttrEdges(b) || [];
+              const hit = bAttrs.some(r => r.node?.categoryId === a.categoryId && r.node?.name === a.name);
+              if (hit) {
+                out.push({
+                  from: b.pos, to: a.pos,
+                  color: blendHex(b.color, a.color),
+                  fromNode: { ...b, kind: "big" },
+                  toNode:   { ...a, kind: "attribute" },
+                });
+                attrHasEdge.add(k);
+                break;
+              }
+            }
+          }
+        }
+      }
     }
     return out;
   }, [visibleBigs, visibleMids, visibleSmalls, visibleAttributes, layout, layers.smalls, layers.mids, layers.attributes, filters.bigs]);
