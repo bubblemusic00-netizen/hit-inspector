@@ -3511,15 +3511,18 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
     setCameraAnimating(v);
   };
 
-  // Keyboard-flight key tracker: a Set of lowercase keys currently
-  // held down. Populated by global listeners, consumed per-frame by
-  // the FreeFlightNav component inside <Canvas>. We intentionally
-  // ignore key events originating in inputs / textareas /
-  // contenteditable regions so typing into the search or filter boxes
-  // doesn't accidentally drift the camera.
+  // Keyboard-flight key tracker: a Set of canonical lowercase keys
+  // currently held down. We key on `e.code` (physical key position,
+  // layout-agnostic: W is always "KeyW" regardless of Hebrew / QWERTY
+  // / AZERTY) and not `e.key`, which on a Hebrew keyboard yields "'"
+  // instead of "w" and broke flight entirely. We ignore key events
+  // originating in inputs / textareas / contenteditable regions so
+  // typing into the search or filter boxes doesn't drift the camera.
   const keyboardMoveRef = useRef(new Set());
   useEffect(() => {
-    const FLY_KEYS = new Set(["w", "a", "s", "d", "x", "z"]);
+    const CODE_TO_KEY = {
+      KeyW: "w", KeyA: "a", KeyS: "s", KeyD: "d", KeyX: "x", KeyZ: "z",
+    };
     const isTextTarget = (t) => {
       if (!t) return false;
       const tag = (t.tagName || "").toLowerCase();
@@ -3527,14 +3530,16 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
     };
     const onKeyDown = (e) => {
       if (isTextTarget(e.target)) return;
-      const k = e.key.toLowerCase();
-      if (!FLY_KEYS.has(k)) return;
-      keyboardMoveRef.current.add(k);
+      const mapped = CODE_TO_KEY[e.code];
+      if (!mapped) return;
+      keyboardMoveRef.current.add(mapped);
       e.preventDefault();
     };
     const onKeyUp = (e) => {
-      const k = e.key.toLowerCase();
-      if (keyboardMoveRef.current.has(k)) keyboardMoveRef.current.delete(k);
+      const mapped = CODE_TO_KEY[e.code];
+      if (mapped && keyboardMoveRef.current.has(mapped)) {
+        keyboardMoveRef.current.delete(mapped);
+      }
     };
     const onBlur = () => keyboardMoveRef.current.clear();
     window.addEventListener("keydown", onKeyDown);
