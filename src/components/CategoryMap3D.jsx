@@ -2336,6 +2336,71 @@ function CameraRig({ focusTarget, resetCount, controlsRef, animatingRef, syncAni
   return null;
 }
 
+// FreeFlightNav — WASD + Z/X keyboard free-flight that shifts both the
+// camera AND the OrbitControls target by the same vector. Because the
+// target moves in lockstep, orbit controls keep working naturally after
+// each move: the user can still drag to rotate around wherever they
+// flew to, scroll to zoom, etc. Without moving the target you'd orbit
+// around the old pivot, which feels broken.
+//
+// Movement is camera-relative for W/A/S/D (go where you're looking)
+// and world-axis for Z/X (always straight down/up), which matches
+// how users instinctively reach for an "elevate" control. Speed
+// scales with camera-to-target distance so flying near a small node
+// isn't unmanageably fast, and flying across the full map isn't
+// glacially slow.
+//
+// Any keypress cancels a pending focus-lerp so keyboard input always
+// wins over a fly-to animation (same principle as OrbitControls
+// onStart). We ignore keys while the user is typing into an <input> /
+// <textarea> / contenteditable element so search / filter typing
+// doesn't drift the camera.
+function FreeFlightNav({ controlsRef, keysDownRef, syncAnimating }) {
+  const { camera } = useThree();
+  const forward = useMemo(() => new THREE.Vector3(), []);
+  const right   = useMemo(() => new THREE.Vector3(), []);
+  const move    = useMemo(() => new THREE.Vector3(), []);
+  const WORLD_UP = useMemo(() => new THREE.Vector3(0, 1, 0), []);
+
+  useFrame((_, dt) => {
+    if (!controlsRef.current) return;
+    const keys = keysDownRef.current;
+    if (!keys || keys.size === 0) return;
+
+    // Cancel any fly-to-focus animation so the keyboard immediately
+    // takes precedence (otherwise lerp + movement fight each other).
+    if (syncAnimating) syncAnimating(false);
+
+    // Speed scales with camera-to-target distance. At default zoom
+    // (dist ~130) that's ~19 u/s — crosses the map in a handful of
+    // seconds. Zoomed into a microstyle (dist ~5) it's ~0.75 u/s —
+    // nudge-precision.
+    const dist = camera.position.distanceTo(controlsRef.current.target);
+    const speed = Math.max(1.2, dist * 0.15);
+    const step = speed * dt;
+
+    forward.subVectors(controlsRef.current.target, camera.position);
+    if (forward.lengthSq() < 1e-6) return;
+    forward.normalize();
+    right.crossVectors(forward, WORLD_UP).normalize();
+
+    move.set(0, 0, 0);
+    if (keys.has("w")) move.add(forward);
+    if (keys.has("s")) move.sub(forward);
+    if (keys.has("d")) move.add(right);
+    if (keys.has("a")) move.sub(right);
+    if (keys.has("x")) move.y += 1;
+    if (keys.has("z")) move.y -= 1;
+
+    if (move.lengthSq() === 0) return;
+    move.normalize().multiplyScalar(step);
+    camera.position.add(move);
+    controlsRef.current.target.add(move);
+    controlsRef.current.update();
+  });
+  return null;
+}
+
 // ── UI overlays ────────────────────────────────────────────────────
 
 function Toggle({ on, onChange, label, color, disabled }) {
@@ -3199,7 +3264,7 @@ function FocusHUD({ focused, layout }) {
       color: T.textMuted, fontFamily: T.fontMono,
       background: "rgba(10,10,15,0.65)", padding: "6px 10px",
       borderRadius: T.r_sm, userSelect: "none", zIndex: 10,
-    }}>drag · scroll · click a node to see its pairings</div>
+    }}>drag · scroll · click a node to see its pairings · wasd / zx to fly</div>
   );
 
   let kindLabel, crumbs;
@@ -3445,6 +3510,42 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
     cameraAnimatingRef.current = v;
     setCameraAnimating(v);
   };
+
+  // Keyboard-flight key tracker: a Set of lowercase keys currently
+  // held down. Populated by global listeners, consumed per-frame by
+  // the FreeFlightNav component inside <Canvas>. We intentionally
+  // ignore key events originating in inputs / textareas /
+  // contenteditable regions so typing into the search or filter boxes
+  // doesn't accidentally drift the camera.
+  const keyboardMoveRef = useRef(new Set());
+  useEffect(() => {
+    const FLY_KEYS = new Set(["w", "a", "s", "d", "x", "z"]);
+    const isTextTarget = (t) => {
+      if (!t) return false;
+      const tag = (t.tagName || "").toLowerCase();
+      return tag === "input" || tag === "textarea" || t.isContentEditable;
+    };
+    const onKeyDown = (e) => {
+      if (isTextTarget(e.target)) return;
+      const k = e.key.toLowerCase();
+      if (!FLY_KEYS.has(k)) return;
+      keyboardMoveRef.current.add(k);
+      e.preventDefault();
+    };
+    const onKeyUp = (e) => {
+      const k = e.key.toLowerCase();
+      if (keyboardMoveRef.current.has(k)) keyboardMoveRef.current.delete(k);
+    };
+    const onBlur = () => keyboardMoveRef.current.clear();
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("blur", onBlur);
+    };
+  }, []);
 
   // Right-click-to-copy: writes the clicked node's name to the system
   // clipboard and flashes a small toast so the user knows it worked.
@@ -4163,6 +4264,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
           mouseButtons={{ LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: null }}
         />
         <CameraRig focusTarget={focused} resetCount={resetCount} controlsRef={controlsRef} animatingRef={cameraAnimatingRef} syncAnimating={syncCameraAnimating} />
+        <FreeFlightNav controlsRef={controlsRef} keysDownRef={keyboardMoveRef} syncAnimating={syncCameraAnimating} />
       </Canvas>
 
       <LayerPanel
