@@ -2442,16 +2442,23 @@ function MultiSelectList({ items, selected, onChange, maxHeight = 170, query = "
   const isOn = (v) => !selected || selected.has(v);
 
   const toggle = (v) => {
-    // Starting from "all" (null): first click picks ONLY that value.
-    // If user is actively typing in the search box, clicks are always
-    // exclusive-select — the point of search-and-click is "narrow to this one".
-    // Otherwise toggle membership. If result equals full set → null.
-    const activeSearch = !!(query && query.trim());
+    // Simple toggle: the click only affects the item clicked. The previous
+    // implementation treated a click-while-all-on as an exclusive select
+    // (and similarly for click-while-searching), which meant one wrong
+    // click instantly unchecked all 17 other genres. User wanted the
+    // click to only flip the one item they actually pressed.
+    //
+    // Semantics:
+    //   selected === null  → "show all" (no filter active)
+    //   selected === Set() → "show none"
+    //   selected === Set(xs) → show only xs
+    //
+    // Starting from null and clicking → build the full set minus the
+    // clicked item. If a subsequent toggle restores every item we collapse
+    // back to null so the "ALL" label lights up again.
     let next;
-    if (activeSearch) {
-      next = selected?.has(v) && selected.size === 1 ? null : new Set([v]);
-    } else if (!selected) {
-      next = new Set([v]);
+    if (!selected) {
+      next = new Set(allValues.filter(x => x !== v));
     } else if (selected.has(v)) {
       next = new Set(selected);
       next.delete(v);
@@ -3632,6 +3639,51 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
 
   const handleSearchResultClick = (item) => {
     setSearch("");
+
+    // "All on" — every layer toggle visible to the user is currently
+    // enabled AND no filter is already narrowing the view. This is the
+    // fresh/default state. When the user searches from here they mean
+    // "isolate just this" — so we narrow the filters to the picked
+    // item's subtree. If they've already customized (turned off a
+    // layer or applied a filter), we leave their setup alone and just
+    // focus — no surprise changes to their curated view.
+    const allOn =
+      layers.bigs && layers.mids &&
+      (!layout.hasSmalls || layers.smalls) &&
+      (!layout.hasAttrs || layers.attributes);
+    const noFilters =
+      !filters.bigs && !filters.mids && !filters.smalls &&
+      !filters.attrCats && !filters.attrs;
+
+    if (allOn && noFilters) {
+      const n = item.node;
+      if (item.kind === "big") {
+        setFilters(f => ({ ...f, bigs: new Set([n.name]) }));
+      } else if (item.kind === "mid") {
+        setFilters(f => ({
+          ...f,
+          bigs: new Set([n.parent]),
+          mids: new Set([n.name]),
+        }));
+      } else if (item.kind === "small") {
+        setFilters(f => ({
+          ...f,
+          bigs:   new Set([n.grandparent]),
+          mids:   new Set([n.parent]),
+          smalls: new Set([smallKey(n)]),
+        }));
+      } else {
+        // Attribute: narrow to that attribute only. We don't also
+        // filter bigs/mids/smalls here because attributes cross-cut
+        // genres — the focus highlight will light up what connects.
+        setFilters(f => ({
+          ...f,
+          attrCats: new Set([n.categoryId]),
+          attrs:    new Set([attrKey(n)]),
+        }));
+      }
+    }
+
     if (item.kind === "big") selectBig(item.node);
     else if (item.kind === "mid") selectMid(item.node);
     else if (item.kind === "small") selectSmall(item.node);
