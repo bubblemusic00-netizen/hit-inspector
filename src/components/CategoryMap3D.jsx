@@ -1512,7 +1512,7 @@ function MidNodes({ mids, focused, layout, onSelect, onHover, sizeMult = 1, rela
 // layout-time position; we rotate that offset around a per-small random
 // axis each frame, keeping the orbit plane stable but different for
 // every micro so they don't all orbit in the same plane.
-function SmallNodes({ smalls, focused, onSelect, onHover, sizeMult = 1, layout }) {
+function SmallNodes({ smalls, focused, onSelect, onHover, sizeMult = 1, layout, livePosRef = null }) {
   const meshRef = useRef();
   const glowRef = useRef();
   const tmpObj = useMemo(() => new THREE.Object3D(), []);
@@ -1590,6 +1590,11 @@ function SmallNodes({ smalls, focused, onSelect, onHover, sizeMult = 1, layout }
       tmpQuat.setFromAxisAngle(tmpAxis, d.orbitPhase + t * d.orbitSpeed);
       tmpVec.set(d.ox, d.oy, d.oz).applyQuaternion(tmpQuat);
       const wx = d.cx + tmpVec.x, wy = d.cy + tmpVec.y, wz = d.cz + tmpVec.z;
+      // Share live position with anything that needs to follow us (edges).
+      // Key format matches what focusLines/allEdges use to reference smalls.
+      if (livePosRef) {
+        livePosRef.current.set(s.grandparent + "/" + s.parent + "/" + s.name, [wx, wy, wz]);
+      }
       tmpObj.position.set(wx, wy, wz);
       tmpObj.rotation.set(0, d.spinPhase + t * d.spinSpeed, 0);
       tmpObj.scale.setScalar(scl * sizeMult * SMALL_R * SMALL_MULT);
@@ -1743,27 +1748,41 @@ function InteractiveEdges({
   hoveredIndex = -1,
   onHoverEdge, onClickEdge,
   widthBase = 3.0, widthHover = 6.0,
+  livePosRef = null,
 }) {
   const { size } = useThree();
   const clearTimerRef = useRef(null);
 
+  // Kind-aware shortening so the line doesn't overlap the node body.
+  // Hoisted so useFrame (below) can reuse the same table without
+  // redefining it per call.
+  const nodeMargin = (k) => {
+    switch (k) {
+      case "big":       return 1.5;
+      case "mid":       return 0.62;
+      case "small":     return 0.30;
+      case "attribute": return 0.45;
+      default:          return 0.45;
+    }
+  };
+  // Lookup a live position for a small endpoint. Returns null if there's
+  // no live position available (meaning the node is static, or we don't
+  // have a livePosRef yet) — callers fall back to the static e.from/e.to.
+  const getLiveEndpoint = (node) => {
+    if (!livePosRef || !node || node.kind !== "small") return null;
+    const key = node.grandparent + "/" + node.parent + "/" + node.name;
+    return livePosRef.current.get(key) || null;
+  };
+
   // Build the batched mesh + lookup from edges. Shortened at each endpoint
   // by a kind-aware margin so lines don't overlap node bodies (fixes click
   // stealing from small nodes).
-  const { mesh, edgeLookup } = useMemo(() => {
-    if (!visible || !edges.length) return { mesh: null, edgeLookup: [] };
-    const nodeMargin = (k) => {
-      switch (k) {
-        case "big":       return 1.5;
-        case "mid":       return 0.62;
-        case "small":     return 0.30;
-        case "attribute": return 0.45;
-        default:          return 0.45;
-      }
-    };
+  const { mesh, edgeLookup, hasLiveEndpoint, posBuffer } = useMemo(() => {
+    if (!visible || !edges.length) return { mesh: null, edgeLookup: [], hasLiveEndpoint: false, posBuffer: null };
     const positions = [];
     const colorsArr = [];
     const lookup = [];
+    let anyLive = false;
     const c = new THREE.Color();
     for (let ei = 0; ei < edges.length; ei++) {
       const e = edges[ei];
@@ -1783,8 +1802,9 @@ function InteractiveEdges({
       c.set(e.color || "#5E6AD2");
       colorsArr.push(c.r, c.g, c.b, c.r, c.g, c.b);
       lookup.push(e);
+      if (e.fromNode?.kind === "small" || e.toNode?.kind === "small") anyLive = true;
     }
-    if (!lookup.length) return { mesh: null, edgeLookup: [] };
+    if (!lookup.length) return { mesh: null, edgeLookup: [], hasLiveEndpoint: false, posBuffer: null };
 
     const geom = new LineSegmentsGeometry();
     geom.setPositions(positions);
@@ -1802,8 +1822,58 @@ function InteractiveEdges({
     });
     mat.resolution.set(size.width || window.innerWidth, size.height || window.innerHeight);
 
-    return { mesh: new LineSegments2(geom, mat), edgeLookup: lookup };
+    // Keep a typed view of the positions so the per-frame update can
+    // write into the same array before pushing back through setPositions.
+    // (LineSegmentsGeometry internally allocates a fresh interleaved
+    // buffer each setPositions call, so this Float32Array is just our
+    // scratch copy.)
+    const posBuf = new Float32Array(positions);
+
+    return { mesh: new LineSegments2(geom, mat), edgeLookup: lookup, hasLiveEndpoint: anyLive, posBuffer: posBuf };
   }, [edges, visible]); // rebuild only when edge set changes
+
+  // Per-frame position update — only runs when at least one edge touches
+  // a small (orbiting) node. Recomputes the shortened segment using the
+  // live world-space endpoint and pushes the updated buffer to the geom.
+  // No-op for edges made entirely of static nodes (bigs/mids/attributes).
+  useFrame(() => {
+    if (!mesh || !hasLiveEndpoint || !livePosRef || !posBuffer) return;
+    let changed = false;
+    for (let i = 0; i < edgeLookup.length; i++) {
+      const e = edgeLookup[i];
+      const fromLive = getLiveEndpoint(e.fromNode);
+      const toLive = getLiveEndpoint(e.toNode);
+      if (!fromLive && !toLive) continue;
+      const fx = fromLive ? fromLive[0] : e.from[0];
+      const fy = fromLive ? fromLive[1] : e.from[1];
+      const fz = fromLive ? fromLive[2] : e.from[2];
+      const tx = toLive ? toLive[0] : e.to[0];
+      const ty = toLive ? toLive[1] : e.to[1];
+      const tz = toLive ? toLive[2] : e.to[2];
+      const dx = tx - fx, dy = ty - fy, dz = tz - fz;
+      const len = Math.sqrt(dx*dx + dy*dy + dz*dz);
+      if (len < 0.001) continue;
+      const mFrom = Math.min(nodeMargin(e.fromNode?.kind), len * 0.35);
+      const mTo   = Math.min(nodeMargin(e.toNode?.kind),   len * 0.35);
+      const tF = mFrom / len;
+      const tT = mTo   / len;
+      const base = i * 6;
+      posBuffer[base + 0] = fx + dx * tF;
+      posBuffer[base + 1] = fy + dy * tF;
+      posBuffer[base + 2] = fz + dz * tF;
+      posBuffer[base + 3] = tx - dx * tT;
+      posBuffer[base + 4] = ty - dy * tT;
+      posBuffer[base + 5] = tz - dz * tT;
+      changed = true;
+    }
+    if (changed) {
+      // setPositions rewires the interleaved buffer in one call. For
+      // focus-mode (dozens of edges) this is cheap; for ON-mode (~1500)
+      // it's still bounded because `hasLiveEndpoint` gates entry — most
+      // ON-mode edges don't touch smalls, so the loop just skips them.
+      mesh.geometry.setPositions(posBuffer);
+    }
+  });
 
   // Keep resolution, linewidth, opacity in sync with props without
   // tearing down the geometry.
@@ -2754,7 +2824,7 @@ function LayerPanel({
   );
 }
 
-function FocusHUD({ focused, onClear, layout }) {
+function FocusHUD({ focused, layout }) {
   if (!focused) return (
     <div style={{
       position: "absolute", bottom: 16, left: 16, fontSize: 10,
@@ -2778,7 +2848,7 @@ function FocusHUD({ focused, onClear, layout }) {
       fontFamily: T.fontMono, zIndex: 10,
     }}>
       <div style={{ fontSize: 9, letterSpacing: ".12em", color: T.textMuted, textTransform: "uppercase", marginBottom: 5 }}>{kindLabel}</div>
-      <div style={{ fontSize: 13, color: T.text, marginBottom: 8, wordBreak: "break-word" }}>
+      <div style={{ fontSize: 13, color: T.text, wordBreak: "break-word" }}>
         {crumbs.map((c, i) => (
           <span key={i}>
             <span style={{ color: i === crumbs.length - 1 ? T.text : T.textSec }}>{c}</span>
@@ -2786,11 +2856,6 @@ function FocusHUD({ focused, onClear, layout }) {
           </span>
         ))}
       </div>
-      <button onClick={onClear} style={{
-        fontSize: 10, color: T.textMuted, background: "transparent",
-        border: `1px solid ${T.borderHi}`, borderRadius: T.r_sm,
-        padding: "3px 8px", cursor: "pointer", fontFamily: T.fontMono, letterSpacing: ".05em",
-      }}>CLEAR ×</button>
     </div>
   );
 }
@@ -2801,23 +2866,22 @@ function ResetViewButton({ onReset, hasFocus }) {
       onClick={onReset}
       title="Reset view (Esc)"
       style={{
-        position: "absolute", bottom: 20, left: "50%", transform: "translateX(-50%)",
         background: "rgba(10,10,15,0.92)", border: `1px solid ${T.borderHi}`,
         borderRadius: T.r_md, padding: "10px 22px", cursor: "pointer",
         color: T.textSec, fontSize: 13, fontFamily: T.fontMono, fontWeight: 500,
         letterSpacing: ".18em", textTransform: "uppercase", userSelect: "none",
-        zIndex: 10, transition: "color 120ms, border-color 120ms, transform 120ms",
+        transition: "color 120ms, border-color 120ms, transform 120ms",
         boxShadow: "0 4px 16px rgba(0,0,0,0.4)",
       }}
       onMouseEnter={e => {
         e.currentTarget.style.color = T.text;
         e.currentTarget.style.borderColor = T.accent;
-        e.currentTarget.style.transform = "translateX(-50%) scale(1.04)";
+        e.currentTarget.style.transform = "scale(1.04)";
       }}
       onMouseLeave={e => {
         e.currentTarget.style.color = T.textSec;
         e.currentTarget.style.borderColor = T.borderHi;
-        e.currentTarget.style.transform = "translateX(-50%) scale(1)";
+        e.currentTarget.style.transform = "scale(1)";
       }}
     >
       ⟲ reset view
@@ -2825,32 +2889,89 @@ function ResetViewButton({ onReset, hasFocus }) {
   );
 }
 
-// Standalone floating auto-rotate toggle. Sits next to the reset button,
-// away from the controls panel — since rotating the map is a primary
-// interaction, not a configuration option.
+// Auto-rotate pill. Visually matches ResetViewButton so the two sit in a
+// cohesive toolbar. When rotation is active the icon spins and the border
+// takes on the accent color; when paused it's muted. Primary interaction,
+// not a configuration setting — belongs in the map, not the side panel.
 function AutoRotateButton({ on, onToggle }) {
   return (
     <div
       onClick={onToggle}
       title={on ? "Auto-rotate on (click to pause)" : "Auto-rotate off (click to resume)"}
       style={{
-        position: "absolute", bottom: 20, right: 24,
-        background: "rgba(10,10,15,0.92)", border: `1px solid ${on ? T.accent : T.borderHi}`,
-        borderRadius: "50%", width: 46, height: 46,
-        display: "flex", alignItems: "center", justifyContent: "center",
-        cursor: "pointer", userSelect: "none", zIndex: 10,
+        background: "rgba(10,10,15,0.92)",
+        border: `1px solid ${on ? T.accent : T.borderHi}`,
+        borderRadius: T.r_md, padding: "10px 18px", cursor: "pointer",
+        color: on ? T.text : T.textSec,
+        fontSize: 13, fontFamily: T.fontMono, fontWeight: 500,
+        letterSpacing: ".18em", textTransform: "uppercase", userSelect: "none",
+        display: "flex", alignItems: "center", gap: 10,
+        transition: "color 120ms, border-color 120ms, transform 120ms",
         boxShadow: "0 4px 16px rgba(0,0,0,0.4)",
-        transition: "border-color 140ms, transform 140ms",
       }}
-      onMouseEnter={e => { e.currentTarget.style.transform = "scale(1.08)"; }}
+      onMouseEnter={e => { e.currentTarget.style.transform = "scale(1.04)"; }}
       onMouseLeave={e => { e.currentTarget.style.transform = "scale(1)"; }}
     >
       <span style={{
-        fontSize: 18, color: on ? T.accent : T.textMuted,
+        fontSize: 16, color: on ? T.accent : T.textMuted,
         animation: on ? "hi-spin 2s linear infinite" : "none",
-        display: "inline-block",
+        display: "inline-block", lineHeight: 1,
       }}>↻</span>
+      <span>{on ? "rotating" : "paused"}</span>
       <style>{`@keyframes hi-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
+    </div>
+  );
+}
+
+// Prominent "exit focus" pill — shown in the toolbar only while a node is
+// focused. Different from "reset view": this only unfocuses (camera stays
+// where the user left it), while Reset View also resets camera + filters.
+// Tinted with the accent color so it visually announces itself as the
+// primary escape hatch from focus mode (the user complained the old small
+// × inside FocusHUD was easy to miss).
+function ExitFocusButton({ onExit }) {
+  return (
+    <div
+      onClick={onExit}
+      title="Exit focus (Esc)"
+      style={{
+        background: "rgba(94,106,210,0.22)",
+        border: `1px solid ${T.accent}`,
+        borderRadius: T.r_md, padding: "10px 20px", cursor: "pointer",
+        color: T.text, fontSize: 13, fontFamily: T.fontMono, fontWeight: 600,
+        letterSpacing: ".18em", textTransform: "uppercase", userSelect: "none",
+        display: "flex", alignItems: "center", gap: 10,
+        transition: "background 120ms, transform 120ms, box-shadow 120ms",
+        boxShadow: "0 4px 20px rgba(94,106,210,0.35)",
+      }}
+      onMouseEnter={e => {
+        e.currentTarget.style.background = "rgba(94,106,210,0.38)";
+        e.currentTarget.style.transform = "scale(1.05)";
+      }}
+      onMouseLeave={e => {
+        e.currentTarget.style.background = "rgba(94,106,210,0.22)";
+        e.currentTarget.style.transform = "scale(1)";
+      }}
+    >
+      <span style={{ fontSize: 15, lineHeight: 1 }}>×</span>
+      <span>exit focus</span>
+    </div>
+  );
+}
+
+// Grouped floating toolbar at the bottom of the map. When focused, the
+// EXIT FOCUS pill gets prime (leftmost) placement — that's the primary
+// action users want while exploring a node. Auto-rotate and Reset View
+// remain always-visible to the right.
+function MapToolbar({ autoRotate, onToggleAutoRotate, onReset, hasFocus, onExitFocus }) {
+  return (
+    <div style={{
+      position: "absolute", bottom: 20, left: "50%", transform: "translateX(-50%)",
+      display: "flex", gap: 12, alignItems: "center", zIndex: 10,
+    }}>
+      {hasFocus && <ExitFocusButton onExit={onExitFocus} />}
+      <AutoRotateButton on={autoRotate} onToggle={onToggleAutoRotate} />
+      <ResetViewButton onReset={onReset} hasFocus={hasFocus} />
     </div>
   );
 }
@@ -2937,6 +3058,16 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
 
   const controlsRef = useRef();
   const interactionTimer = useRef(null);
+  // Live-position map: smalls orbit around their parents via useFrame, so
+  // their world-space position changes every frame. Anything that draws
+  // geometry connecting TO a small (focus lines, ON-mode edges) needs to
+  // follow the small or the lines will dangle in empty space.
+  //
+  // SmallNodes writes to this Map each frame (key: "grandparent/parent/name"
+  // → [x,y,z]); InteractiveEdges reads from it each frame to update the
+  // batched LineSegments2 buffer in place. No re-render cost — the only
+  // per-frame work is the buffer write on affected segments.
+  const livePosRef = useRef(new Map());
 
   // Reset when switching categories
   useEffect(() => {
@@ -3146,7 +3277,6 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
       <Canvas
         camera={{ position: [0, 15, 130], fov: 50, near: 0.1, far: 800 }}
         dpr={[1, 2]}
-        onPointerMissed={() => setFocused(null)}
         onPointerDown={onCanvasPointerDown}
         onPointerUp={onCanvasPointerUp}
       >
@@ -3172,7 +3302,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
 
           {layout.hasSmalls && layers.mids && layers.smalls && (
             <SmallNodes smalls={visibleSmalls} focused={focused} layout={layout} onSelect={selectSmall} onHover={setHovered}
-                        sizeMult={nodeSizes.small} />
+                        sizeMult={nodeSizes.small} livePosRef={livePosRef} />
           )}
 
           {layout.hasAttrs && layers.attributes && (
@@ -3189,6 +3319,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
               onClickEdge={clickEdge}
               widthBase={2.2}
               widthHover={4.0}
+              livePosRef={livePosRef}
             />
           )}
           {linesMode !== "off" && focused && (
@@ -3200,6 +3331,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
               onClickEdge={clickEdge}
               widthBase={4.0}
               widthHover={7.0}
+              livePosRef={livePosRef}
             />
           )}
           <EdgeTooltip
@@ -3234,9 +3366,14 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
         onResetCustomization={handleResetCustomization}
       />
       <StatsBadge layout={layout} focused={focused} />
-      <ResetViewButton onReset={handleReset} hasFocus={!!focused || !!filters.bigs || !!filters.mids || !!filters.attrCats} />
-      <AutoRotateButton on={autoRotate} onToggle={() => setAutoRotate(v => !v)} />
-      <FocusHUD focused={focused} onClear={() => setFocused(null)} layout={layout} />
+      <MapToolbar
+        autoRotate={autoRotate}
+        onToggleAutoRotate={() => setAutoRotate(v => !v)}
+        onReset={handleReset}
+        hasFocus={!!focused}
+        onExitFocus={() => setFocused(null)}
+      />
+      <FocusHUD focused={focused} layout={layout} />
     </div>
   );
 }
