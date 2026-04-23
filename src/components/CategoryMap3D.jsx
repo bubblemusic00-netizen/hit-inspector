@@ -467,6 +467,24 @@ function mulberry32(seed) {
 const smallKey = (s) => `${s.grandparent}/${s.parent}/${s.name}`;
 const attrKey  = (a) => `${a.categoryId}:${a.name}`;
 
+// Averages two CSS-style colors into a single hex (#rrggbb). Uses THREE
+// so any format that THREE.Color accepts (hex, 'rgb()', named) works.
+// Cached by "a|b" key — a single edge-build pass blends the same color
+// pairs hundreds of times (e.g. every small under the same big shares a
+// pair), so the memoized lookup saves the Color allocations.
+const BLEND_CACHE = new Map();
+function blendHex(a, b) {
+  const A = a || "#5E6AD2";
+  const B = b || A;
+  const key = A + "|" + B;
+  const cached = BLEND_CACHE.get(key);
+  if (cached) return cached;
+  const c = new THREE.Color(A).lerp(new THREE.Color(B), 0.5);
+  const out = "#" + c.getHexString();
+  BLEND_CACHE.set(key, out);
+  return out;
+}
+
 // ── Force-directed 3D layout (numerically stable) ──────────────────
 function runForceLayout(nodes, edges, iterations = 200, fixedHubIdx = null) {
   const n = nodes.length;
@@ -1274,14 +1292,16 @@ function focusLines(focused, layout) {
   if (focused.kind === "big") {
     layout.mids.filter(s => s.parent === focused.name).forEach(s => {
       lines.push({
-        from: focused.pos, to: s.pos, color: s.color, kind: "tree",
+        from: focused.pos, to: s.pos,
+        color: blendHex(focused.color, s.color), kind: "tree",
         fromNode: F, toNode: { ...s, kind: "mid" },
       });
     });
     if (layout.hasAttrs) {
       (layout.bigAttrEdges(focused) || []).forEach(({ node, cat }) => {
         lines.push({
-          from: focused.pos, to: node.pos, color: cat.color, kind: "attr",
+          from: focused.pos, to: node.pos,
+          color: blendHex(focused.color, cat.color), kind: "attr",
           fromNode: F, toNode: { ...node, kind: "attribute" },
         });
       });
@@ -1289,13 +1309,15 @@ function focusLines(focused, layout) {
   } else if (focused.kind === "mid") {
     const parent = layout.bigByName[focused.parent];
     if (parent) lines.push({
-      from: parent.pos, to: focused.pos, color: focused.color, kind: "tree",
+      from: parent.pos, to: focused.pos,
+      color: blendHex(parent.color, focused.color), kind: "tree",
       fromNode: { ...parent, kind: "big" }, toNode: F,
     });
     if (layout.hasSmalls) {
       layout.smalls.filter(m => m.parent === focused.name && m.grandparent === focused.parent).forEach(m => {
         lines.push({
-          from: focused.pos, to: m.pos, color: m.color, kind: "tree",
+          from: focused.pos, to: m.pos,
+          color: blendHex(focused.color, m.color), kind: "tree",
           fromNode: F, toNode: { ...m, kind: "small" },
         });
       });
@@ -1303,7 +1325,8 @@ function focusLines(focused, layout) {
     if (layout.hasAttrs) {
       (layout.midToAttrs(focused) || []).forEach(({ node, cat }) => {
         lines.push({
-          from: focused.pos, to: node.pos, color: cat.color, kind: "attr",
+          from: focused.pos, to: node.pos,
+          color: blendHex(focused.color, cat.color), kind: "attr",
           fromNode: F, toNode: { ...node, kind: "attribute" },
         });
       });
@@ -1311,13 +1334,15 @@ function focusLines(focused, layout) {
   } else if (focused.kind === "small") {
     const parent = layout.midsByKey[focused.parent + "/" + focused.grandparent];
     if (parent) lines.push({
-      from: parent.pos, to: focused.pos, color: focused.color, kind: "tree",
+      from: parent.pos, to: focused.pos,
+      color: blendHex(parent.color, focused.color), kind: "tree",
       fromNode: { ...parent, kind: "mid" }, toNode: F,
     });
     if (layout.hasAttrs && parent) {
       (layout.midToAttrs(parent) || []).slice(0, 3).forEach(({ node, cat }) => {
         lines.push({
-          from: focused.pos, to: node.pos, color: cat.color, kind: "attr",
+          from: focused.pos, to: node.pos,
+          color: blendHex(focused.color, cat.color), kind: "attr",
           fromNode: F, toNode: { ...node, kind: "attribute" },
         });
       });
@@ -1334,7 +1359,8 @@ function focusLines(focused, layout) {
           values.forEach(val => {
             const node = layout.attributes.find(a => a.categoryId === tgt && a.name === val);
             if (node) lines.push({
-              from: focused.pos, to: node.pos, color: node.color, kind: "compl",
+              from: focused.pos, to: node.pos,
+              color: blendHex(focused.color, node.color), kind: "compl",
               fromNode: F, toNode: { ...node, kind: "attribute" },
             });
           });
@@ -1343,7 +1369,8 @@ function focusLines(focused, layout) {
     }
     (layout.attrToMids(focused, 15) || []).forEach(s => {
       lines.push({
-        from: focused.pos, to: s.pos, color: s.color, kind: "attr",
+        from: focused.pos, to: s.pos,
+        color: blendHex(focused.color, s.color), kind: "attr",
         fromNode: F, toNode: { ...s, kind: "mid" },
       });
     });
@@ -3560,7 +3587,8 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
       const parent = layout.bigByName?.[m.parent];
       if (parent?.pos && m.pos && (!filters.bigs || filters.bigs.has(parent.name))) {
         out.push({
-          from: parent.pos, to: m.pos, color: m.color || parent.color,
+          from: parent.pos, to: m.pos,
+          color: blendHex(parent.color, m.color),
           fromNode: { ...parent, kind: "big" }, toNode: { ...m, kind: "mid" },
         });
       }
@@ -3573,7 +3601,8 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
       for (const s of visibleSmalls) {
         const parent = midLookup(s.parent, s.grandparent);
         if (parent?.pos && s.pos) out.push({
-          from: parent.pos, to: s.pos, color: s.color || parent.color,
+          from: parent.pos, to: s.pos,
+          color: blendHex(parent.color, s.color),
           fromNode: { ...parent, kind: "mid" }, toNode: { ...s, kind: "small" },
         });
       }
@@ -3594,8 +3623,10 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
           if (added >= 3) break;
           if (!node?.pos) continue;
           if (!visibleAttrKeys.has(`${node.categoryId}:${node.name}`)) continue;
+          const attrColor = (cat?.color) || node.color;
           out.push({
-            from: m.pos, to: node.pos, color: (cat?.color) || node.color,
+            from: m.pos, to: node.pos,
+            color: blendHex(m.color, attrColor),
             fromNode: { ...m, kind: "mid" }, toNode: { ...node, kind: "attribute" },
           });
           added++;
@@ -3622,8 +3653,10 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
             const k = `big/${b.name}::${node.categoryId}:${node.name}`;
             if (alreadyEmitted.has(k)) continue;
             alreadyEmitted.add(k);
+            const attrColor = (cat?.color) || node.color;
             out.push({
-              from: b.pos, to: node.pos, color: (cat?.color) || node.color,
+              from: b.pos, to: node.pos,
+              color: blendHex(b.color, attrColor),
               fromNode: { ...b, kind: "big" }, toNode: { ...node, kind: "attribute" },
             });
             added++;
