@@ -120,9 +120,9 @@ const CAT_TO_COMP_FIELD = Object.fromEntries(
 
 // ── Visual / geometric constants ───────────────────────────────────
 const BIG_R      = 1.3;
-const MID_R      = 0.34;
-const SMALL_R    = 0.11;
-const ATTR_R     = 0.24;
+const MID_R      = 0.48;   // was 0.34 — too small to see
+const SMALL_R    = 0.2;    // was 0.11 — invisible without zooming in
+const ATTR_R     = 0.32;   // was 0.24 — matched up with mids
 const MID_ORBIT  = 5.0;
 const SMALL_ORBIT= 1.0;
 
@@ -418,6 +418,39 @@ function placeSmallsOrbital(mids, smallsRaw) {
   return smalls;
 }
 
+// ── Shared: decluster (anti-clipping) ──────────────────────────────
+// Pairwise repulsion pass. If two nodes end up closer than `minDist`,
+// push them apart along the line between them until they're at `minDist`.
+// Runs for at most `iterations` passes, stopping early if nothing moves.
+// O(n²) per iteration — fine for n up to ~1500. For bigger sets we'd
+// need spatial hashing, but we don't have any at that scale here.
+function declusterTier(nodes, minDist, iterations = 15) {
+  if (!nodes.length || minDist <= 0) return;
+  const minSq = minDist * minDist;
+  for (let iter = 0; iter < iterations; iter++) {
+    let moved = false;
+    for (let i = 0; i < nodes.length; i++) {
+      const a = nodes[i].pos;
+      if (!a) continue;
+      for (let j = i + 1; j < nodes.length; j++) {
+        const b = nodes[j].pos;
+        if (!b) continue;
+        const dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2];
+        const distSq = dx*dx + dy*dy + dz*dz;
+        if (distSq < minSq && distSq > 1e-9) {
+          const dist = Math.sqrt(distSq);
+          const push = (minDist - dist) * 0.5;
+          const ux = dx / dist, uy = dy / dist, uz = dz / dist;
+          a[0] -= ux * push; a[1] -= uy * push; a[2] -= uz * push;
+          b[0] += ux * push; b[1] += uy * push; b[2] += uz * push;
+          moved = true;
+        }
+      }
+    }
+    if (!moved) break;
+  }
+}
+
 // ── Layout: Genres (and Subgenres / Microstyles) ───────────────────
 function buildGenreLayout(data) {
   const tree = data.GENRE_TREE || {};
@@ -501,6 +534,9 @@ function buildGenreLayout(data) {
   const bigs = forceNodes.filter(n => n.kind === "big");
   const mids = forceNodes.filter(n => n.kind === "mid");
   const attributes = forceNodes.filter(n => n.kind === "attribute");
+  // Anti-clipping passes so no two nodes sit inside each other.
+  declusterTier(mids, MID_R * 2 + 0.15, 15);
+  declusterTier(attributes, ATTR_R * 2 + 0.1, 10);
   const bigByName = {}; bigs.forEach(b => { bigByName[b.name] = b; });
   const midsByKey = {}; mids.forEach(m => { midsByKey[m.name + "/" + m.parent] = m; });
 
@@ -515,6 +551,7 @@ function buildGenreLayout(data) {
     });
   });
   const smalls = placeSmallsOrbital(mids, smallsRaw);
+  declusterTier(smalls, SMALL_R * 2 + 0.05, 8);
 
   // ── 4. Aggregated genre→attr table — used for `bigAttrEdges` only,
   //     not for layout edges (those come from sub→attr directly).
@@ -617,6 +654,7 @@ function buildInstrumentsLayout(data) {
     });
   });
   const { mids, midsByKey } = placeMidsOrbital(midsRaw, bigByName, null, null);
+  declusterTier(mids, MID_R * 2 + 0.15, 15);
 
   const smallsRaw = [];
   fNames.forEach(fName => {
@@ -628,6 +666,7 @@ function buildInstrumentsLayout(data) {
     });
   });
   const smalls = placeSmallsOrbital(mids, smallsRaw);
+  declusterTier(smalls, SMALL_R * 2 + 0.05, 8);
 
   return {
     kind: "instruments",
@@ -730,6 +769,8 @@ function buildMoodsLayout(data) {
   };
 
   const { mids, midsByKey } = placeMidsOrbital(midsRaw, bigByName, attrByKey, attrLookup);
+  declusterTier(mids, MID_R * 2 + 0.15, 15);
+  declusterTier(attributes, ATTR_R * 2 + 0.1, 10);
 
   return {
     kind: "moods",
@@ -865,6 +906,8 @@ function buildFlatLayout(data, categoryId) {
   // Larger orbit radius for flat layouts since many items share one hub
   const orbit = items.length > 30 ? 9 : items.length > 15 ? 7 : 5;
   const { mids, midsByKey } = placeMidsOrbital(midsRaw, bigByName, attrByKey, attrLookup, orbit);
+  declusterTier(mids, MID_R * 2 + 0.15, 15);
+  declusterTier(attributes, ATTR_R * 2 + 0.1, 10);
 
   // Singular label
   const singular = cat.label.endsWith("s") ? cat.label.slice(0, -1) : cat.label;
@@ -1107,8 +1150,8 @@ function FocusEdges({ lines, visible }) {
   return (
     <>
       {lines.map((l, i) => (
-        <Line key={i} points={[l.from, l.to]} color={l.color} lineWidth={3}
-              transparent opacity={l.kind === "tree" ? 0.9 : l.kind === "attr" ? 0.72 : 0.55} />
+        <Line key={i} points={[l.from, l.to]} color={l.color} lineWidth={1.6}
+              transparent opacity={l.kind === "tree" ? 0.85 : l.kind === "attr" ? 0.65 : 0.5} />
       ))}
     </>
   );
@@ -1116,7 +1159,7 @@ function FocusEdges({ lines, visible }) {
 
 // Batched renderer — one geometry for all edges. Uses LineSegments so a
 // few thousand lines render at 60fps.
-function AllTreeLines({ edges, opacity = 0.28 }) {
+function AllTreeLines({ edges, opacity = 0.22 }) {
   const geom = useMemo(() => {
     if (!edges.length) return null;
     const positions = new Float32Array(edges.length * 6);
@@ -1143,107 +1186,6 @@ function AllTreeLines({ edges, opacity = 0.28 }) {
     <lineSegments geometry={geom}>
       <lineBasicMaterial vertexColors transparent opacity={opacity} depthWrite={false} />
     </lineSegments>
-  );
-}
-
-// Twinkling stars sprinkled along each edge. Positions are computed ONCE
-// (interpolation along the edge) and stored on the InstancedMesh matrices.
-// Per-frame work is just `scale = sin(t)` per instance — for 1200 stars
-// this is ~microseconds per frame (~3% of a 16ms budget at worst).
-//
-// The stars inherit the edge's color, so Trap's tree edges have purple
-// stars, Rock's red, etc. — reinforcing the visual hierarchy.
-function EdgeStars({ edges, visible, count = 3, minEdgeLen = 2.2 }) {
-  const { positions, colors, phases, freqs, n } = useMemo(() => {
-    if (!edges.length) return { positions: null, colors: null, phases: null, freqs: null, n: 0 };
-    // Pre-compute per-edge star count based on length — long edges get a
-    // couple extra stars, short ones just one.
-    const records = [];
-    for (const e of edges) {
-      const dx = e.to[0] - e.from[0];
-      const dy = e.to[1] - e.from[1];
-      const dz = e.to[2] - e.from[2];
-      const len = Math.sqrt(dx*dx + dy*dy + dz*dz);
-      if (len < minEdgeLen) continue;
-      // Longer edges get proportionally more stars, capped at count+2.
-      const k = Math.min(count + 2, Math.max(1, Math.round(len / 3)));
-      for (let i = 1; i <= k; i++) {
-        const t = i / (k + 1);
-        records.push({
-          x: e.from[0] + dx * t,
-          y: e.from[1] + dy * t,
-          z: e.from[2] + dz * t,
-          color: e.color || "#ffffff",
-        });
-      }
-    }
-    const n = records.length;
-    const positions = new Float32Array(n * 3);
-    const colors = new Float32Array(n * 3);
-    const phases = new Float32Array(n);
-    const freqs = new Float32Array(n);
-    const c = new THREE.Color();
-    for (let i = 0; i < n; i++) {
-      const r = records[i];
-      positions[i*3+0] = r.x;
-      positions[i*3+1] = r.y;
-      positions[i*3+2] = r.z;
-      c.set(r.color);
-      colors[i*3+0] = c.r;
-      colors[i*3+1] = c.g;
-      colors[i*3+2] = c.b;
-      // Deterministic phase based on position so the pattern is stable
-      // across renders and doesn't shimmer when layout rebuilds.
-      phases[i] = (r.x * 0.31 + r.y * 0.17 + r.z * 0.43) % (Math.PI * 2);
-      freqs[i]  = 0.9 + ((i * 37) % 7) * 0.18;   // 0.9 — 2.0
-    }
-    return { positions, colors, phases, freqs, n };
-  }, [edges, count, minEdgeLen]);
-
-  const meshRef = useRef();
-  const dummy = useMemo(() => new THREE.Object3D(), []);
-  const tmpColor = useMemo(() => new THREE.Color(), []);
-
-  // Set static matrices + per-instance colors ONCE when positions change.
-  useEffect(() => {
-    const mesh = meshRef.current;
-    if (!mesh || !n) return;
-    for (let i = 0; i < n; i++) {
-      dummy.position.set(positions[i*3+0], positions[i*3+1], positions[i*3+2]);
-      dummy.scale.setScalar(1);
-      dummy.updateMatrix();
-      mesh.setMatrixAt(i, dummy.matrix);
-      tmpColor.setRGB(colors[i*3+0], colors[i*3+1], colors[i*3+2]);
-      mesh.setColorAt(i, tmpColor);
-    }
-    mesh.instanceMatrix.needsUpdate = true;
-    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-    mesh.count = n;
-  }, [n, positions, colors, dummy, tmpColor]);
-
-  // Per-frame twinkle — only scale changes; positions stay static.
-  useFrame(({ clock }) => {
-    const mesh = meshRef.current;
-    if (!visible || !mesh || !n) return;
-    const t = clock.elapsedTime;
-    for (let i = 0; i < n; i++) {
-      const tw = 0.5 + 0.5 * Math.sin(t * freqs[i] + phases[i]);
-      // Scale oscillates between 0.25 and 1.15 — feels like blinking.
-      const scale = 0.25 + tw * 0.9;
-      dummy.position.set(positions[i*3+0], positions[i*3+1], positions[i*3+2]);
-      dummy.scale.setScalar(scale);
-      dummy.updateMatrix();
-      mesh.setMatrixAt(i, dummy.matrix);
-    }
-    mesh.instanceMatrix.needsUpdate = true;
-  });
-
-  if (!visible || !n) return null;
-  return (
-    <instancedMesh ref={meshRef} args={[undefined, undefined, n]}>
-      <sphereGeometry args={[0.1, 8, 8]} />
-      <meshBasicMaterial transparent opacity={0.95} toneMapped={false} depthWrite={false} />
-    </instancedMesh>
   );
 }
 
@@ -1529,6 +1471,32 @@ function LayerPanel({
   search, setSearch,
   searchResults, onSearchResultClick,
 }) {
+  // Panel is draggable by its header. Position is kept in local state —
+  // resets to top-left when the category changes (outer component remounts).
+  const [pos, setPos] = useState({ x: 16, y: 16 });
+  const dragStart = useRef(null);
+
+  const onHeaderMouseDown = (e) => {
+    dragStart.current = { x: e.clientX, y: e.clientY, px: pos.x, py: pos.y };
+    const onMove = (ev) => {
+      if (!dragStart.current) return;
+      const dx = ev.clientX - dragStart.current.x;
+      const dy = ev.clientY - dragStart.current.y;
+      setPos({
+        x: Math.max(0, dragStart.current.px + dx),
+        y: Math.max(0, dragStart.current.py + dy),
+      });
+    };
+    const onUp = () => {
+      dragStart.current = null;
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    e.preventDefault();
+  };
+
   // Big options — always all bigs.
   const bigOptions = layout.bigs.map(b => ({ value: b.name, label: b.name }));
 
@@ -1555,24 +1523,54 @@ function LayerPanel({
 
   return (
     <div style={{
-      position: "absolute", top: 16, left: 16,
+      position: "absolute", top: pos.y, left: pos.x,
       width: 260,
       maxHeight: "calc(100vh - 160px)",
       overflowY: "auto",
       background: "rgba(10,10,15,0.94)",
       border: `1px solid ${T.borderHi}`,
       borderRadius: T.r_md,
-      padding: "6px 0",
+      padding: "0 0 6px",
       zIndex: 10,
       boxShadow: "0 6px 24px rgba(0,0,0,0.5)",
       backdropFilter: "blur(6px)",
       WebkitBackdropFilter: "blur(6px)",
     }}>
+      {/* Drag handle / title bar */}
+      <div
+        onMouseDown={onHeaderMouseDown}
+        style={{
+          display: "flex", alignItems: "center", justifyContent: "space-between",
+          padding: "7px 10px", cursor: "grab",
+          borderBottom: `1px solid ${T.borderHi}`,
+          background: "rgba(20,20,30,0.5)",
+          userSelect: "none",
+          borderTopLeftRadius: T.r_md, borderTopRightRadius: T.r_md,
+        }}
+        onMouseEnter={e => e.currentTarget.style.background = "rgba(30,30,45,0.6)"}
+        onMouseLeave={e => e.currentTarget.style.background = "rgba(20,20,30,0.5)"}
+      >
+        <span style={{
+          fontSize: 10, fontFamily: T.fontMono, letterSpacing: ".18em",
+          color: T.textSec, textTransform: "uppercase",
+        }}>⋮⋮ controls</span>
+        <span
+          onClick={(e) => { e.stopPropagation(); setPos({ x: 16, y: 16 }); }}
+          onMouseDown={e => e.stopPropagation()}
+          style={{
+            fontSize: 9, color: T.textMuted, cursor: "pointer",
+            padding: "2px 6px", borderRadius: 3,
+            fontFamily: T.fontMono, letterSpacing: ".08em",
+          }}
+          onMouseEnter={e => { e.currentTarget.style.color = T.text; }}
+          onMouseLeave={e => { e.currentTarget.style.color = T.textMuted; }}
+        >⟲</span>
+      </div>
+
       <div style={{
-        padding: "4px 10px 4px", fontSize: 9, letterSpacing: ".14em",
+        padding: "8px 10px 4px", fontSize: 9, letterSpacing: ".14em",
         color: T.textMuted, textTransform: "uppercase",
-        borderBottom: `1px solid ${T.borderHi}`, marginBottom: 2,
-        fontFamily: T.fontMono,
+        marginBottom: 2, fontFamily: T.fontMono,
       }}>show</div>
       <Toggle on label={`${layout.bigLabel} (big)`} color="#A78BFA" disabled />
       <Toggle on={layers.mids} label={`${layout.midLabel} (mid)`} color="#60A5FA"
@@ -1937,10 +1935,8 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
             <AttributeNodes attributes={visibleAttributes} focused={focused} layout={layout} onSelect={selectAttr} onHover={setHovered} />
           )}
 
-          {linesMode === "on" && <AllTreeLines edges={allEdges} opacity={0.28} />}
-          {linesMode === "on" && <EdgeStars edges={allEdges} visible={true} count={3} />}
+          {linesMode === "on" && <AllTreeLines edges={allEdges} opacity={0.22} />}
           {linesMode !== "off" && <FocusEdges lines={lines} visible={!!focused} />}
-          {linesMode !== "off" && <EdgeStars edges={lines} visible={!!focused} count={4} minEdgeLen={1.5} />}
 
           <HoverTooltip hovered={hovered} />
         </Suspense>
