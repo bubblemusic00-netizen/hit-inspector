@@ -43,24 +43,24 @@ import { CATEGORIES } from "../categories.js";
 
 // ── Palette ────────────────────────────────────────────────────────
 const GENRE_COLORS = {
-  "Hip-Hop":                "#A78BFA",
-  "R&B / Soul":             "#FB7185",
-  "Pop":                    "#F472B6",
-  "Disco / Dance":          "#22D3EE",
-  "Electronic":             "#60A5FA",
-  "Latin":                  "#FB923C",
-  "Rock":                   "#EF4444",
-  "Metal":                  "#991B1B",
-  "World / Global":         "#2DD4BF",
-  "Blues":                  "#3B82F6",
-  "Country / Americana":    "#F59E0B",
-  "Folk / Acoustic":        "#84CC16",
-  "Jazz":                   "#FBBF24",
-  "Ambient / New Age":      "#C4B5FD",
-  "Soundtrack / Score":     "#64748B",
-  "Classical / Orchestral": "#E5E7EB",
-  "Gospel / Spiritual":     "#FCD34D",
-  "Experimental":           "#E879F9",
+  "Hip-Hop":                "#A78BFA",  // purple
+  "R&B / Soul":             "#FB7185",  // coral
+  "Pop":                    "#F472B6",  // pink
+  "Disco / Dance":          "#22D3EE",  // cyan
+  "Electronic":             "#60A5FA",  // blue
+  "Latin":                  "#FB923C",  // orange
+  "Rock":                   "#EF4444",  // red
+  "Metal":                  "#818CF8",  // indigo (was near-black red — hard to see)
+  "World / Global":         "#2DD4BF",  // teal
+  "Blues":                  "#3B82F6",  // deep blue
+  "Country / Americana":    "#F59E0B",  // amber
+  "Folk / Acoustic":        "#84CC16",  // lime
+  "Jazz":                   "#FBBF24",  // gold
+  "Ambient / New Age":      "#C4B5FD",  // lavender
+  "Soundtrack / Score":     "#A8A29E",  // warm grey (was cold slate)
+  "Classical / Orchestral": "#F3E8D2",  // ivory
+  "Gospel / Spiritual":     "#FCD34D",  // yellow
+  "Experimental":           "#E879F9",  // magenta
 };
 
 const INSTRUMENT_COLORS = {
@@ -1240,22 +1240,239 @@ function SegmentedControl({ value, onChange, options }) {
   );
 }
 
-function SectionLabel({ children }) {
+function SectionLabel({ children, action }) {
   return (
-    <div style={{ padding: "6px 10px 4px", fontSize: 9, letterSpacing: ".14em", color: T.textMuted, textTransform: "uppercase", borderTop: `1px solid ${T.borderHi}`, marginTop: 4, fontFamily: T.fontMono }}>
-      {children}
+    <div style={{
+      display: "flex", alignItems: "center", justifyContent: "space-between",
+      padding: "8px 10px 4px", borderTop: `1px solid ${T.borderHi}`, marginTop: 4,
+    }}>
+      <span style={{
+        fontSize: 9, letterSpacing: ".14em", color: T.textMuted,
+        textTransform: "uppercase", fontFamily: T.fontMono,
+      }}>{children}</span>
+      {action}
     </div>
   );
 }
 
-function LayerPanel({ layers, setLayers, layout, linesMode, setLinesMode, autoRotate, setAutoRotate }) {
+// Styled dropdown that matches the dark theme. Native <select> is used for
+// accessibility (keyboard nav, screen readers) but visually restyled.
+function Dropdown({ value, onChange, options, placeholder }) {
+  return (
+    <select
+      value={value || ""}
+      onChange={e => onChange(e.target.value || null)}
+      style={{
+        width: "calc(100% - 20px)", margin: "2px 10px 4px",
+        padding: "5px 8px", background: "rgba(20,20,28,0.85)",
+        border: `1px solid ${T.borderHi}`, borderRadius: 4,
+        color: T.text, fontSize: 12, fontFamily: T.fontMono,
+        outline: "none", cursor: "pointer",
+      }}
+    >
+      <option value="">{placeholder}</option>
+      {options.map(o => (
+        <option key={o.value} value={o.value} style={{ background: "#16161e" }}>{o.label}</option>
+      ))}
+    </select>
+  );
+}
+
+function SearchBox({ value, onChange, results, onResultClick }) {
+  return (
+    <div style={{ padding: "2px 10px 6px" }}>
+      <input
+        type="text"
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        onKeyDown={e => {
+          if (e.key === "Enter" && results.length > 0) {
+            e.preventDefault();
+            onResultClick(results[0]);
+          }
+        }}
+        placeholder="Search in map… (Enter to pick top match)"
+        style={{
+          width: "100%", boxSizing: "border-box",
+          padding: "6px 10px", background: "rgba(20,20,28,0.85)",
+          border: `1px solid ${T.borderHi}`, borderRadius: 4,
+          color: T.text, fontSize: 12, fontFamily: T.fontMono,
+          outline: "none",
+        }}
+      />
+      {results.length > 0 && (
+        <div style={{
+          marginTop: 4, maxHeight: 180, overflowY: "auto",
+          background: "rgba(14,14,22,0.95)",
+          border: `1px solid ${T.borderHi}`, borderRadius: 4,
+        }}>
+          {results.map((r, i) => {
+            const kindBadge =
+              r.kind === "big"  ? "G" :
+              r.kind === "mid"  ? "S" :
+              r.kind === "small" ? "M" : "A";
+            const kindColor =
+              r.kind === "big"   ? "#A78BFA" :
+              r.kind === "mid"   ? "#60A5FA" :
+              r.kind === "small" ? "#F472B6" : "#2DD4BF";
+            return (
+              <div
+                key={`${r.kind}:${r.name}:${i}`}
+                onClick={() => onResultClick(r)}
+                style={{
+                  display: "flex", alignItems: "center", gap: 8,
+                  padding: "5px 8px", cursor: "pointer",
+                  borderBottom: i < results.length - 1 ? `1px solid ${T.border}` : "none",
+                  fontSize: 11, fontFamily: T.fontMono, color: T.text,
+                }}
+                onMouseEnter={e => e.currentTarget.style.background = "rgba(94,106,210,0.18)"}
+                onMouseLeave={e => e.currentTarget.style.background = "transparent"}
+              >
+                <span style={{
+                  display: "inline-block", width: 14, height: 14, lineHeight: "14px",
+                  textAlign: "center", fontSize: 9, fontWeight: 700,
+                  color: kindColor, border: `1px solid ${kindColor}`, borderRadius: 2,
+                  flexShrink: 0,
+                }}>{kindBadge}</span>
+                <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.name}</span>
+                {r.parent && (
+                  <span style={{ fontSize: 9, color: T.textMuted, letterSpacing: ".05em" }}>
+                    {r.grandparent ? `${r.grandparent} › ${r.parent}` : r.parent}
+                  </span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AttrCategoryChips({ layout, filters, setFilters }) {
+  const allIds = ATTR_CATS.map(c => c.id);
+  const active = filters.attrCats;
+  const isOn = (id) => !active || active.has(id);
+
+  const toggle = (id) => {
+    // First click on a category with "all on" state → select ONLY that one.
+    // Subsequent clicks on other categories → add them to the set.
+    // Clicking the only active category → back to "all on".
+    setFilters(f => {
+      let next;
+      if (!f.attrCats) {
+        next = new Set([id]);
+      } else {
+        next = new Set(f.attrCats);
+        if (next.has(id)) next.delete(id);
+        else next.add(id);
+        if (next.size === 0 || next.size === allIds.length) next = null;
+      }
+      return { ...f, attrCats: next };
+    });
+  };
+  const reset = () => setFilters(f => ({ ...f, attrCats: null }));
+
+  return (
+    <div style={{ padding: "2px 10px 8px" }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+        {ATTR_CATS.map(cat => {
+          const on = isOn(cat.id);
+          return (
+            <div
+              key={cat.id}
+              onClick={() => toggle(cat.id)}
+              style={{
+                display: "inline-flex", alignItems: "center", gap: 5,
+                padding: "3px 7px",
+                background: on ? `${cat.color}22` : "transparent",
+                border: `1px solid ${on ? cat.color : T.border}`,
+                borderRadius: 3, cursor: "pointer", userSelect: "none",
+                fontSize: 10, fontFamily: T.fontMono,
+                color: on ? T.text : T.textMuted,
+                transition: "background 120ms, border-color 120ms, color 120ms",
+              }}
+            >
+              <span style={{
+                width: 6, height: 6, borderRadius: "50%",
+                background: on ? cat.color : "transparent",
+                border: `1px solid ${cat.color}`,
+              }} />
+              {cat.label}
+            </div>
+          );
+        })}
+      </div>
+      {active && (
+        <div
+          onClick={reset}
+          style={{
+            marginTop: 4, fontSize: 9, letterSpacing: ".1em", color: T.textMuted,
+            cursor: "pointer", fontFamily: T.fontMono, textTransform: "uppercase",
+          }}
+          onMouseEnter={e => e.currentTarget.style.color = T.text}
+          onMouseLeave={e => e.currentTarget.style.color = T.textMuted}
+        >
+          ↺ show all categories
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LayerPanel({
+  layers, setLayers, layout,
+  linesMode, setLinesMode,
+  autoRotate, setAutoRotate,
+  filters, setFilters,
+  search, setSearch,
+  searchResults, onSearchResultClick,
+}) {
+  // Big options — always all bigs.
+  const bigOptions = layout.bigs.map(b => ({ value: b.name, label: b.name }));
+
+  // Mid options depend on selected big (scope the list to subs under it).
+  const midOptions = useMemo(() => {
+    let src = layout.mids;
+    if (filters.bigName) src = src.filter(m => m.parent === filters.bigName);
+    return src
+      .map(m => ({ value: m.name, label: m.name }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }, [layout.mids, filters.bigName]);
+
+  const handleBigChange = (v) => {
+    setFilters(f => {
+      // Changing the big invalidates the mid selection unless the mid
+      // still exists under the new big.
+      if (v && f.midName) {
+        const stillValid = layout.mids.some(m => m.parent === v && m.name === f.midName);
+        if (!stillValid) return { ...f, bigName: v, midName: null };
+      }
+      return { ...f, bigName: v };
+    });
+  };
+
   return (
     <div style={{
       position: "absolute", top: 16, left: 16,
-      background: "rgba(10,10,15,0.92)", border: `1px solid ${T.borderHi}`,
-      borderRadius: T.r_md, padding: "6px 0 4px", minWidth: 210, zIndex: 10,
+      width: 260,
+      maxHeight: "calc(100vh - 160px)",
+      overflowY: "auto",
+      background: "rgba(10,10,15,0.94)",
+      border: `1px solid ${T.borderHi}`,
+      borderRadius: T.r_md,
+      padding: "6px 0",
+      zIndex: 10,
+      boxShadow: "0 6px 24px rgba(0,0,0,0.5)",
+      backdropFilter: "blur(6px)",
+      WebkitBackdropFilter: "blur(6px)",
     }}>
-      <div style={{ padding: "4px 10px 4px", fontSize: 9, letterSpacing: ".14em", color: T.textMuted, textTransform: "uppercase", borderBottom: `1px solid ${T.borderHi}`, marginBottom: 2, fontFamily: T.fontMono }}>show</div>
+      <div style={{
+        padding: "4px 10px 4px", fontSize: 9, letterSpacing: ".14em",
+        color: T.textMuted, textTransform: "uppercase",
+        borderBottom: `1px solid ${T.borderHi}`, marginBottom: 2,
+        fontFamily: T.fontMono,
+      }}>show</div>
       <Toggle on label={`${layout.bigLabel} (big)`} color="#A78BFA" disabled />
       <Toggle on={layers.mids} label={`${layout.midLabel} (mid)`} color="#60A5FA"
         onChange={v => setLayers(l => ({ ...l, mids: v, smalls: !v ? false : l.smalls }))} />
@@ -1266,6 +1483,49 @@ function LayerPanel({ layers, setLayers, layout, linesMode, setLinesMode, autoRo
       {layout.hasAttrs && (
         <Toggle on={layers.attributes} label="Attributes cloud" color="#2DD4BF"
           onChange={v => setLayers(l => ({ ...l, attributes: v }))} />
+      )}
+
+      <SectionLabel>search</SectionLabel>
+      <SearchBox
+        value={search}
+        onChange={setSearch}
+        results={searchResults}
+        onResultClick={onSearchResultClick}
+      />
+
+      <SectionLabel action={
+        (filters.bigName || filters.midName) ? (
+          <span
+            onClick={() => setFilters(f => ({ ...f, bigName: null, midName: null }))}
+            style={{
+              fontSize: 9, color: T.textMuted, cursor: "pointer",
+              fontFamily: T.fontMono, letterSpacing: ".1em",
+            }}
+            onMouseEnter={e => e.currentTarget.style.color = T.text}
+            onMouseLeave={e => e.currentTarget.style.color = T.textMuted}
+          >clear</span>
+        ) : null
+      }>isolate</SectionLabel>
+      <Dropdown
+        value={filters.bigName}
+        onChange={handleBigChange}
+        options={bigOptions}
+        placeholder={`All ${layout.bigLabel.toLowerCase()}s`}
+      />
+      {layers.mids && (
+        <Dropdown
+          value={filters.midName}
+          onChange={v => setFilters(f => ({ ...f, midName: v }))}
+          options={midOptions}
+          placeholder={`All ${layout.midLabel.toLowerCase()}s`}
+        />
+      )}
+
+      {layout.hasAttrs && (
+        <>
+          <SectionLabel>attributes</SectionLabel>
+          <AttrCategoryChips layout={layout} filters={filters} setFilters={setFilters} />
+        </>
       )}
 
       <SectionLabel>connections</SectionLabel>
@@ -1403,6 +1663,17 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
   const [autoRotate, setAutoRotate] = useState(false);
   const [interacting, setInteracting] = useState(false);
   const [resetCount, setResetCount] = useState(0);
+
+  // Filtering panel — lets the user isolate a specific big/mid and restrict
+  // attrs to specific categories. `null` means "no filter" for that slot.
+  //   bigName:   show only this big + its descendants
+  //   midName:   show only this mid + its children
+  //   attrCats:  null = all categories; Set of ids = only those
+  const [filters, setFilters] = useState({ bigName: null, midName: null, attrCats: null });
+  // Live text search. When non-empty, a dropdown of top matches is shown;
+  // clicking a match focuses the corresponding node.
+  const [search, setSearch] = useState("");
+
   const controlsRef = useRef();
   const interactionTimer = useRef(null);
 
@@ -1417,19 +1688,71 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
     });
     setLinesMode("auto");
     setAutoRotate(false);
+    setFilters({ bigName: null, midName: null, attrCats: null });
+    setSearch("");
   }, [categoryId, layout.hasSmalls, layout.hasAttrs]);
 
-  // Escape key: clear focus (or reset if nothing focused)
+  // Escape key: clear search → clear focus → reset view (cascading)
   useEffect(() => {
     const handler = (e) => {
       if (e.key === "Escape") {
-        if (focused) setFocused(null);
+        if (search) setSearch("");
+        else if (focused) setFocused(null);
         else setResetCount(c => c + 1);
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [focused]);
+  }, [focused, search]);
+
+  // ── Visible lists (filters applied) ──────────────────────────────
+  const visibleBigs = useMemo(() => {
+    if (!filters.bigName) return layout.bigs;
+    return layout.bigs.filter(b => b.name === filters.bigName);
+  }, [layout.bigs, filters.bigName]);
+
+  const visibleMids = useMemo(() => {
+    let mids = layout.mids;
+    if (filters.bigName) mids = mids.filter(m => m.parent === filters.bigName);
+    if (filters.midName) mids = mids.filter(m => m.name === filters.midName);
+    return mids;
+  }, [layout.mids, filters.bigName, filters.midName]);
+
+  const visibleSmalls = useMemo(() => {
+    let smalls = layout.smalls;
+    if (filters.bigName) smalls = smalls.filter(s => s.grandparent === filters.bigName);
+    if (filters.midName) smalls = smalls.filter(s => s.parent === filters.midName);
+    return smalls;
+  }, [layout.smalls, filters.bigName, filters.midName]);
+
+  const visibleAttributes = useMemo(() => {
+    if (!filters.attrCats) return layout.attributes;
+    return layout.attributes.filter(a => filters.attrCats.has(a.categoryId));
+  }, [layout.attributes, filters.attrCats]);
+
+  // ── Search index ──────────────────────────────────────────────────
+  const searchIndex = useMemo(() => {
+    const out = [];
+    for (const b of layout.bigs) out.push({ kind: "big", name: b.name, node: b });
+    for (const m of layout.mids) out.push({ kind: "mid", name: m.name, parent: m.parent, node: m });
+    for (const s of layout.smalls) out.push({ kind: "small", name: s.name, parent: s.parent, grandparent: s.grandparent, node: s });
+    for (const a of layout.attributes) out.push({ kind: "attribute", name: a.label || a.name, categoryId: a.categoryId, node: a });
+    return out;
+  }, [layout]);
+
+  const searchResults = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (q.length < 1) return [];
+    // Prefer prefix matches first, then substring matches.
+    const prefix = [], sub = [];
+    for (const item of searchIndex) {
+      const n = item.name.toLowerCase();
+      if (n === q) prefix.unshift(item);          // exact match goes to top
+      else if (n.startsWith(q)) prefix.push(item);
+      else if (n.includes(q)) sub.push(item);
+    }
+    return [...prefix, ...sub].slice(0, 12);
+  }, [search, searchIndex]);
 
   const lines = useMemo(() => focusLines(focused, layout), [focused, layout]);
 
@@ -1437,22 +1760,24 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
   // so it works for every category shape (genres, instruments, moods, flat).
   const allEdges = useMemo(() => {
     const out = [];
-    for (const m of layout.mids) {
+    for (const m of visibleMids) {
       const parent = layout.bigByName?.[m.parent];
-      if (parent?.pos && m.pos) out.push({ from: parent.pos, to: m.pos, color: m.color || parent.color });
+      if (parent?.pos && m.pos && (!filters.bigName || parent.name === filters.bigName)) {
+        out.push({ from: parent.pos, to: m.pos, color: m.color || parent.color });
+      }
     }
     if (layout.hasSmalls && layers.smalls && layers.mids) {
       const midLookup = (sName, gName) =>
         layout.midsByKey?.[sName + "/" + gName] ||
         layout.midsByKey?.[sName] ||
         layout.mids.find(x => x.name === sName && (!gName || x.parent === gName));
-      for (const s of layout.smalls) {
+      for (const s of visibleSmalls) {
         const parent = midLookup(s.parent, s.grandparent);
         if (parent?.pos && s.pos) out.push({ from: parent.pos, to: s.pos, color: s.color || parent.color });
       }
     }
     return out;
-  }, [layout, layers.smalls, layers.mids]);
+  }, [visibleMids, visibleSmalls, layout, layers.smalls, layers.mids, filters.bigName]);
 
   const selectBig   = b => setFocused({ kind: "big",       name: b.name, pos: b.pos });
   const selectMid   = s => setFocused({ kind: "mid",       name: s.name, parent: s.parent, pos: s.pos });
@@ -1461,7 +1786,17 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
 
   const handleReset = () => {
     setFocused(null);
+    setFilters({ bigName: null, midName: null, attrCats: null });
+    setSearch("");
     setResetCount(c => c + 1);
+  };
+
+  const handleSearchResultClick = (item) => {
+    setSearch("");
+    if (item.kind === "big") selectBig(item.node);
+    else if (item.kind === "mid") selectMid(item.node);
+    else if (item.kind === "small") selectSmall(item.node);
+    else selectAttr(item.node);
   };
 
   // Pause auto-rotate for ~2.5s after each interaction. This prevents the
@@ -1477,27 +1812,28 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
   };
 
   return (
-    <div style={{ position: "relative", width: "100%", height: "calc(100vh - 80px)", minHeight: 500, background: "#04040B", overflow: "hidden" }}>
+    <div style={{ position: "relative", width: "100%", height: "calc(100vh - 80px)", minHeight: 500, background: "radial-gradient(ellipse at center, #0A0A14 0%, #04040B 70%)", overflow: "hidden" }}>
       <Canvas camera={{ position: [0, 15, 130], fov: 50, near: 0.1, far: 800 }} dpr={[1, 2]} onPointerMissed={() => setFocused(null)}>
         <color attach="background" args={["#04040B"]} />
-        <ambientLight intensity={0.32} />
-        <pointLight position={[0, 0, 0]} intensity={0.6} distance={240} />
+        <ambientLight intensity={0.36} />
+        <pointLight position={[0, 0, 0]} intensity={0.7} distance={260} color="#9aa8ff" />
+        <pointLight position={[80, 40, 40]} intensity={0.35} distance={200} color="#ffd6a8" />
 
         <Suspense fallback={null}>
           <Stars radius={300} depth={90} count={2000} factor={4} saturation={0} fade speed={0.2} />
 
-          <BigNodes bigs={layout.bigs} focused={focused} layout={layout} onSelect={selectBig} onHover={setHovered} />
+          <BigNodes bigs={visibleBigs} focused={focused} layout={layout} onSelect={selectBig} onHover={setHovered} />
 
           {layers.mids && (
-            <MidNodes mids={layout.mids} focused={focused} layout={layout} onSelect={selectMid} onHover={setHovered} />
+            <MidNodes mids={visibleMids} focused={focused} layout={layout} onSelect={selectMid} onHover={setHovered} />
           )}
 
           {layout.hasSmalls && layers.mids && layers.smalls && (
-            <SmallNodes smalls={layout.smalls} focused={focused} onSelect={selectSmall} onHover={setHovered} />
+            <SmallNodes smalls={visibleSmalls} focused={focused} onSelect={selectSmall} onHover={setHovered} />
           )}
 
           {layout.hasAttrs && layers.attributes && (
-            <AttributeNodes attributes={layout.attributes} focused={focused} layout={layout} onSelect={selectAttr} onHover={setHovered} />
+            <AttributeNodes attributes={visibleAttributes} focused={focused} layout={layout} onSelect={selectAttr} onHover={setHovered} />
           )}
 
           {linesMode === "on" && <AllTreeLines edges={allEdges} opacity={0.22} />}
@@ -1512,11 +1848,17 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
         <CameraRig focusTarget={focused} resetCount={resetCount} controlsRef={controlsRef} />
       </Canvas>
 
-      <LayerPanel layers={layers} setLayers={setLayers} layout={layout}
-                  linesMode={linesMode} setLinesMode={setLinesMode}
-                  autoRotate={autoRotate} setAutoRotate={setAutoRotate} />
+      <LayerPanel
+        layers={layers} setLayers={setLayers} layout={layout}
+        linesMode={linesMode} setLinesMode={setLinesMode}
+        autoRotate={autoRotate} setAutoRotate={setAutoRotate}
+        filters={filters} setFilters={setFilters}
+        search={search} setSearch={setSearch}
+        searchResults={searchResults}
+        onSearchResultClick={handleSearchResultClick}
+      />
       <StatsBadge layout={layout} focused={focused} />
-      <ResetViewButton onReset={handleReset} hasFocus={!!focused} />
+      <ResetViewButton onReset={handleReset} hasFocus={!!focused || !!filters.bigName || !!filters.midName || !!filters.attrCats} />
       <FocusHUD focused={focused} onClear={() => setFocused(null)} layout={layout} />
     </div>
   );
