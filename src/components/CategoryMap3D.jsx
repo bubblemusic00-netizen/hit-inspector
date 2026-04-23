@@ -190,7 +190,8 @@ function runForceLayout(nodes, edges, iterations = 200, fixedHubIdx = null) {
       const dy = b.pos[1] - a.pos[1];
       const dz = b.pos[2] - a.pos[2];
       const dist = Math.sqrt(dx * dx + dy * dy + dz * dz) + 0.01;
-      const delta = Math.max(-12, Math.min(dist - IDEAL, 18));
+      const ideal = e.ideal !== undefined ? e.ideal : IDEAL;
+      const delta = Math.max(-12, Math.min(dist - ideal, 18));
       const degNorm = 1 / Math.sqrt(degree[e.from] * degree[e.to] + 1);
       const f = delta * SPRING_K * e.strength * degNorm;
       const ux = dx / dist, uy = dy / dist, uz = dz / dist;
@@ -423,20 +424,100 @@ function buildGenreLayout(data) {
   const gi = data.GENRE_INTUITION || {};
   const gNames = Object.keys(tree);
 
+  // ── 1. Build graph with genres + SUBS + attributes ──────────────
+  // Subs now participate in the force layout so their final position
+  // comes from their pairings (attrs they use + parent gravity), not
+  // from a rigid orbital snap.
   const bigsNodes = gNames.map(g => ({
     id: "b:" + g, kind: "big", name: g,
-    color: GENRE_COLORS[g] || DEFAULT_COLOR, mass: 4.0,
+    color: GENRE_COLORS[g] || DEFAULT_COLOR, mass: 5.0,
   }));
+
+  // Subs — keyed by "Parent/Sub" so name collisions across genres don't clash
+  const midsNodesRaw = [];
+  gNames.forEach(gName => {
+    Object.keys(tree[gName]).forEach(sName => {
+      midsNodesRaw.push({
+        id: "m:" + gName + "/" + sName, kind: "mid",
+        name: sName, parent: gName,
+        color: GENRE_COLORS[gName] || DEFAULT_COLOR,
+        mass: 1.8,
+      });
+    });
+  });
 
   const { nodes: attrNodes, byKey: attrByKey, idToIdx: attrLocalIdx } = buildAttributeCloud(data, []);
 
-  const forceNodes = [...bigsNodes, ...attrNodes];
+  const forceNodes = [...bigsNodes, ...midsNodesRaw, ...attrNodes];
   const idToIdx = {};
   forceNodes.forEach((n, i) => { idToIdx[n.id] = i; });
 
+  // ── 2. Edges (all with per-edge ideal distance) ─────────────────
   const edges = [];
 
-  // Big → Attr edges (aggregated from all subs' GENRE_INTUITION)
+  // Genre → Subgenre: strong spring, short ideal — keeps hierarchy visible.
+  // Not so strong that subs get locked on a shell.
+  gNames.forEach(gName => {
+    const gi_ = idToIdx["b:" + gName];
+    Object.keys(tree[gName]).forEach(sName => {
+      const si = idToIdx["m:" + gName + "/" + sName];
+      edges.push({ from: gi_, to: si, kind: "tree", strength: 2.6, ideal: 5.0 });
+    });
+  });
+
+  // Sub → Attr: top-2 per attr category per sub (capped to avoid edge explosion).
+  // This is where the "strategic by pairings" positioning comes from —
+  // subs are pulled toward the attributes they use.
+  midsNodesRaw.forEach(sub => {
+    const entry = gi[sub.name] || gi[sub.name.toLowerCase()];
+    if (!entry) return;
+    const si = idToIdx[sub.id];
+    ATTR_CATS.forEach(cat => {
+      if (!cat.giField) return;
+      const vals = entry[cat.giField] || [];
+      // Count frequency (duplicates in the arr boost weight), then top-2 unique
+      const counts = {};
+      for (const v of vals) counts[v] = (counts[v] || 0) + 1;
+      const top = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 2);
+      for (const [val, c] of top) {
+        const node = attrByKey[cat.id + ":" + val];
+        if (!node) continue;
+        const ai = idToIdx[node.id];
+        edges.push({ from: si, to: ai, kind: "s-a", strength: 0.7 + Math.min(c, 3) * 0.1, ideal: 8.0 });
+      }
+    });
+  });
+
+  // Attr ↔ Attr complement edges: weak spring, clusters related attrs.
+  buildAttrComplementEdges(attrNodes, attrLocalIdx, data, []).forEach(e => {
+    const fromAttrIdx = idToIdx[attrNodes[e.from].id];
+    const toAttrIdx = idToIdx[attrNodes[e.to].id];
+    if (fromAttrIdx !== undefined && toAttrIdx !== undefined)
+      edges.push({ from: fromAttrIdx, to: toAttrIdx, kind: "compl", strength: 0.3, ideal: 6.0 });
+  });
+
+  runForceLayout(forceNodes, edges, 180);
+
+  const bigs = forceNodes.filter(n => n.kind === "big");
+  const mids = forceNodes.filter(n => n.kind === "mid");
+  const attributes = forceNodes.filter(n => n.kind === "attribute");
+  const bigByName = {}; bigs.forEach(b => { bigByName[b.name] = b; });
+  const midsByKey = {}; mids.forEach(m => { midsByKey[m.name + "/" + m.parent] = m; });
+
+  // ── 3. Microstyles — still Fibonacci around their subgenre ──────
+  const smallsRaw = [];
+  gNames.forEach(gName => {
+    Object.entries(tree[gName]).forEach(([sName, micros]) => {
+      if (!Array.isArray(micros)) return;
+      micros.forEach(mName => {
+        smallsRaw.push({ kind: "small", name: mName, parent: sName, grandparent: gName });
+      });
+    });
+  });
+  const smalls = placeSmallsOrbital(mids, smallsRaw);
+
+  // ── 4. Aggregated genre→attr table — used for `bigAttrEdges` only,
+  //     not for layout edges (those come from sub→attr directly).
   const bigAttrCount = {};
   gNames.forEach(g => { bigAttrCount[g] = {}; });
   gNames.forEach(gName => {
@@ -453,42 +534,7 @@ function buildGenreLayout(data) {
     });
   });
 
-  gNames.forEach(gName => {
-    const fi = idToIdx["b:" + gName];
-    ATTR_CATS.forEach(cat => {
-      if (!cat.giField) return;
-      const sameCat = [];
-      Object.entries(bigAttrCount[gName]).forEach(([k, c]) => {
-        if (k.startsWith(cat.id + ":")) sameCat.push({ k, c });
-      });
-      sameCat.sort((a, b) => b.c - a.c);
-      sameCat.slice(0, 10).forEach(({ k, c }) => {
-        const ti = idToIdx["a:" + k];
-        if (ti !== undefined)
-          edges.push({ from: fi, to: ti, kind: "b-a", strength: 0.5 + Math.min(c, 8) * 0.12 });
-      });
-    });
-  });
-
-  // Attr ↔ Attr
-  buildAttrComplementEdges(attrNodes, attrLocalIdx, data, []).forEach(e => {
-    edges.push({ from: e.from + bigsNodes.length, to: e.to + bigsNodes.length, kind: "compl", strength: e.strength });
-  });
-
-  runForceLayout(forceNodes, edges, 200);
-
-  const bigs = forceNodes.filter(n => n.kind === "big");
-  const attributes = forceNodes.filter(n => n.kind === "attribute");
-  const bigByName = {}; bigs.forEach(b => { bigByName[b.name] = b; });
-
-  const midsRaw = [];
-  gNames.forEach(gName => {
-    Object.keys(tree[gName]).forEach(sName => {
-      midsRaw.push({ kind: "mid", name: sName, parent: gName });
-    });
-  });
-
-  const attrLookup = s => {
+  const subAttrs = s => {
     const entry = gi[s.name] || gi[s.name.toLowerCase()];
     if (!entry) return [];
     const res = [];
@@ -502,26 +548,22 @@ function buildGenreLayout(data) {
     return res;
   };
 
-  const { mids, midsByKey } = placeMidsOrbital(midsRaw, bigByName, attrByKey, attrLookup);
-
-  const smallsRaw = [];
-  gNames.forEach(gName => {
-    Object.entries(tree[gName]).forEach(([sName, micros]) => {
-      if (!Array.isArray(micros)) return;
-      micros.forEach(mName => {
-        smallsRaw.push({ kind: "small", name: mName, parent: sName, grandparent: gName });
-      });
-    });
-  });
-  const smalls = placeSmallsOrbital(mids, smallsRaw);
-
   return {
     kind: "genres",
     bigs, mids, smalls, attributes,
     bigByName, midsByKey, data,
     bigLabel: "Genre", midLabel: "Subgenre", smallLabel: "Microstyle",
     hasSmalls: true, hasAttrs: true,
-    midToAttrs: mid => attrLookup(mid).map(n => ({ node: n, cat: ATTR_CAT_BY_ID[n.categoryId] })),
+    // All explicit tree edges — used when user turns "show lines" to ON.
+    allTreeEdges: (() => {
+      const out = [];
+      for (const m of mids) {
+        const parent = bigByName[m.parent];
+        if (parent) out.push({ from: parent.pos, to: m.pos, color: m.color, kind: "tree" });
+      }
+      return out;
+    })(),
+    midToAttrs: mid => subAttrs(mid).map(n => ({ node: n, cat: ATTR_CAT_BY_ID[n.categoryId] })),
     attrToMids: (attr, cap = 15) => {
       const cat = ATTR_CAT_BY_ID[attr.categoryId];
       if (!cat?.giField) return [];
@@ -1072,6 +1114,38 @@ function FocusEdges({ lines, visible }) {
   );
 }
 
+// Batched renderer — one geometry for all edges. Uses LineSegments so a
+// few thousand lines render at 60fps.
+function AllTreeLines({ edges, opacity = 0.22 }) {
+  const geom = useMemo(() => {
+    if (!edges.length) return null;
+    const positions = new Float32Array(edges.length * 6);
+    const colors = new Float32Array(edges.length * 6);
+    const c = new THREE.Color();
+    edges.forEach((e, i) => {
+      positions[i * 6 + 0] = e.from[0];
+      positions[i * 6 + 1] = e.from[1];
+      positions[i * 6 + 2] = e.from[2];
+      positions[i * 6 + 3] = e.to[0];
+      positions[i * 6 + 4] = e.to[1];
+      positions[i * 6 + 5] = e.to[2];
+      c.set(e.color || "#ffffff");
+      colors[i * 6 + 0] = c.r; colors[i * 6 + 1] = c.g; colors[i * 6 + 2] = c.b;
+      colors[i * 6 + 3] = c.r; colors[i * 6 + 4] = c.g; colors[i * 6 + 5] = c.b;
+    });
+    const g = new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    g.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+    return g;
+  }, [edges]);
+  if (!geom) return null;
+  return (
+    <lineSegments geometry={geom}>
+      <lineBasicMaterial vertexColors transparent opacity={opacity} depthWrite={false} />
+    </lineSegments>
+  );
+}
+
 function HoverTooltip({ hovered }) {
   if (!hovered) return null;
   const pos = hovered.pos;
@@ -1138,12 +1212,40 @@ function Toggle({ on, onChange, label, color, disabled }) {
   );
 }
 
-function LayerPanel({ layers, setLayers, layout }) {
+function SegmentedControl({ value, onChange, options }) {
+  return (
+    <div style={{
+      display: "flex", margin: "4px 10px 6px", borderRadius: 4,
+      border: `1px solid ${T.borderHi}`, overflow: "hidden",
+    }}>
+      {options.map(opt => (
+        <div key={opt.value} onClick={() => onChange(opt.value)} style={{
+          flex: 1, textAlign: "center", padding: "4px 0",
+          fontSize: 10, fontFamily: T.fontMono, letterSpacing: ".06em",
+          cursor: "pointer", userSelect: "none",
+          background: value === opt.value ? T.borderHi : "transparent",
+          color: value === opt.value ? T.text : T.textMuted,
+          textTransform: "uppercase",
+        }}>{opt.label}</div>
+      ))}
+    </div>
+  );
+}
+
+function SectionLabel({ children }) {
+  return (
+    <div style={{ padding: "6px 10px 4px", fontSize: 9, letterSpacing: ".14em", color: T.textMuted, textTransform: "uppercase", borderTop: `1px solid ${T.borderHi}`, marginTop: 4, fontFamily: T.fontMono }}>
+      {children}
+    </div>
+  );
+}
+
+function LayerPanel({ layers, setLayers, layout, linesMode, setLinesMode, autoRotate, setAutoRotate }) {
   return (
     <div style={{
       position: "absolute", top: 16, left: 16,
       background: "rgba(10,10,15,0.92)", border: `1px solid ${T.borderHi}`,
-      borderRadius: T.r_md, padding: "6px 0", minWidth: 210, zIndex: 10,
+      borderRadius: T.r_md, padding: "6px 0 4px", minWidth: 210, zIndex: 10,
     }}>
       <div style={{ padding: "4px 10px 4px", fontSize: 9, letterSpacing: ".14em", color: T.textMuted, textTransform: "uppercase", borderBottom: `1px solid ${T.borderHi}`, marginBottom: 2, fontFamily: T.fontMono }}>show</div>
       <Toggle on label={`${layout.bigLabel} (big)`} color="#A78BFA" disabled />
@@ -1157,6 +1259,17 @@ function LayerPanel({ layers, setLayers, layout }) {
         <Toggle on={layers.attributes} label="Attributes cloud" color="#2DD4BF"
           onChange={v => setLayers(l => ({ ...l, attributes: v }))} />
       )}
+
+      <SectionLabel>connections</SectionLabel>
+      <SegmentedControl value={linesMode} onChange={setLinesMode} options={[
+        { value: "off",  label: "off" },
+        { value: "auto", label: "auto" },
+        { value: "on",   label: "on" },
+      ]} />
+
+      <SectionLabel>motion</SectionLabel>
+      <Toggle on={autoRotate} label="Auto-rotate" color="#FACC15"
+        onChange={setAutoRotate} />
     </div>
   );
 }
@@ -1229,6 +1342,8 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
   });
   const [focused, setFocused] = useState(null);
   const [hovered, setHovered] = useState(null);
+  const [linesMode, setLinesMode] = useState("auto");   // "off" | "auto" | "on"
+  const [autoRotate, setAutoRotate] = useState(false);
   const controlsRef = useRef();
 
   // Reset when switching categories
@@ -1240,9 +1355,33 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
       smalls: layout.hasSmalls && categoryId === "microstyles",
       attributes: layout.hasAttrs,
     });
+    setLinesMode("auto");
+    setAutoRotate(false);
   }, [categoryId, layout.hasSmalls, layout.hasAttrs]);
 
   const lines = useMemo(() => focusLines(focused, layout), [focused, layout]);
+
+  // All tree edges — used when linesMode === "on". Computed from positions
+  // so it works for every category shape (genres, instruments, moods, flat).
+  const allEdges = useMemo(() => {
+    const out = [];
+    for (const m of layout.mids) {
+      const parent = layout.bigByName?.[m.parent];
+      if (parent?.pos && m.pos) out.push({ from: parent.pos, to: m.pos, color: m.color || parent.color });
+    }
+    if (layout.hasSmalls && layers.smalls && layers.mids) {
+      // Look up the mid by (name, parent) tuple. Handle both keying styles.
+      const midLookup = (sName, gName) =>
+        layout.midsByKey?.[sName + "/" + gName] ||
+        layout.midsByKey?.[sName] ||
+        layout.mids.find(x => x.name === sName && (!gName || x.parent === gName));
+      for (const s of layout.smalls) {
+        const parent = midLookup(s.parent, s.grandparent);
+        if (parent?.pos && s.pos) out.push({ from: parent.pos, to: s.pos, color: s.color || parent.color });
+      }
+    }
+    return out;
+  }, [layout, layers.smalls, layers.mids]);
 
   const selectBig   = b => setFocused({ kind: "big",       name: b.name, pos: b.pos });
   const selectMid   = s => setFocused({ kind: "mid",       name: s.name, parent: s.parent, pos: s.pos });
@@ -1250,7 +1389,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
   const selectAttr  = a => setFocused({ kind: "attribute", name: a.name, label: a.label, categoryId: a.categoryId, pos: a.pos });
 
   return (
-    <div style={{ position: "relative", width: "100%", height: "100%", minHeight: 500, background: "#04040B", overflow: "hidden" }}>
+    <div style={{ position: "relative", width: "100%", height: "calc(100vh - 80px)", minHeight: 500, background: "#04040B", overflow: "hidden" }}>
       <Canvas camera={{ position: [0, 15, 130], fov: 50, near: 0.1, far: 800 }} dpr={[1, 2]} onPointerMissed={() => setFocused(null)}>
         <color attach="background" args={["#04040B"]} />
         <ambientLight intensity={0.32} />
@@ -1273,15 +1412,19 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
             <AttributeNodes attributes={layout.attributes} focused={focused} layout={layout} onSelect={selectAttr} onHover={setHovered} />
           )}
 
-          <FocusEdges lines={lines} visible={!!focused} />
+          {linesMode === "on" && <AllTreeLines edges={allEdges} opacity={0.22} />}
+          {linesMode !== "off" && <FocusEdges lines={lines} visible={!!focused} />}
+
           <HoverTooltip hovered={hovered} />
         </Suspense>
 
-        <OrbitControls ref={controlsRef} enableDamping dampingFactor={0.07} minDistance={2} maxDistance={260} rotateSpeed={0.55} zoomSpeed={0.9} panSpeed={0.6} />
+        <OrbitControls ref={controlsRef} enableDamping dampingFactor={0.07} minDistance={2} maxDistance={260} rotateSpeed={0.55} zoomSpeed={0.9} panSpeed={0.6} autoRotate={autoRotate} autoRotateSpeed={0.6} />
         <CameraRig focusTarget={focused} controlsRef={controlsRef} />
       </Canvas>
 
-      <LayerPanel layers={layers} setLayers={setLayers} layout={layout} />
+      <LayerPanel layers={layers} setLayers={setLayers} layout={layout}
+                  linesMode={linesMode} setLinesMode={setLinesMode}
+                  autoRotate={autoRotate} setAutoRotate={setAutoRotate} />
       <StatsBadge layout={layout} />
       <FocusHUD focused={focused} onClear={() => setFocused(null)} layout={layout} />
     </div>

@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { T } from "./theme.js";
 import Layout from "./components/Layout.jsx";
 import CategoryMap3D from "./components/CategoryMap3D.jsx";
-import CategoryList from "./components/CategoryList.jsx";
+import CategoryPage from "./components/CategoryPage.jsx";
 import OverviewPage from "./components/OverviewPage.jsx";
 import SearchPage from "./components/SearchPage.jsx";
 import { CATEGORIES, buildDerivedData } from "./categories.js";
@@ -13,10 +13,6 @@ export default function App() {
   const [selected, setSelected] = useState("overview");
   const [tab, setTab] = useState("items");
   const [preselect, setPreselect] = useState(null);
-
-  // View mode persists across category navigation — user toggles once,
-  // stays in that view while browsing categories.
-  const [viewMode, setViewMode] = useState("map"); // "map" | "list"
 
   useEffect(() => {
     let cancelled = false;
@@ -36,7 +32,12 @@ export default function App() {
     return () => { cancelled = true; };
   }, []);
 
-  useEffect(() => { setTab("items"); }, [selected]);
+  // When the user changes category, default back to Items — except for the
+  // special "3D Map" sidebar entry, which should land on the map tab.
+  useEffect(() => {
+    if (selected === "map3d") setTab("map");
+    else setTab("items");
+  }, [selected]);
 
   const handleSidebarSelect = (id) => {
     setPreselect(null);
@@ -53,23 +54,44 @@ export default function App() {
 
   const derived = buildDerivedData(raw.data);
 
-  const isCategoryView = selected !== "overview" && selected !== "search";
-  // map3d sidebar item renders genres like the Genres page — same component,
-  // same toggle behavior.
-  const catIdForCategory = selected === "map3d" ? "genres" : selected;
-  const resolvedCat = CATEGORIES.find(c => c.id === catIdForCategory);
-
+  // ── Routing ────────────────────────────────────────────────────────
+  // Sidebar categories render a 4-tab page:
+  //   items / family / stats → existing CategoryPage (the tab prop drives it)
+  //   map                    → the 3D galaxy for that category
+  //
+  // "overview" and "search" are their own pages, no tabs.
+  // "map3d" legacy entry → redirect to Genres map.
   let mainContent;
+  let showTabs = false;
+
   if (selected === "overview") {
     mainContent = <OverviewPage raw={raw} derived={derived} />;
   } else if (selected === "search") {
     mainContent = <SearchPage data={raw.data} onResultClick={handleSearchResultClick} />;
-  } else if (!resolvedCat) {
-    mainContent = <div style={{ padding: T.s6, fontFamily: T.fontMono, color: T.textMuted }}>Unknown category.</div>;
-  } else if (viewMode === "list") {
-    mainContent = <CategoryList categoryId={resolvedCat.id} data={raw.data} />;
+  } else if (selected === "map3d") {
+    mainContent = <CategoryMap3D categoryId="genres" data={raw.data} />;
+    showTabs = false;
   } else {
-    mainContent = <CategoryMap3D categoryId={resolvedCat.id} data={raw.data} />;
+    const cat = CATEGORIES.find(c => c.id === selected);
+    if (!cat) {
+      mainContent = <div style={{ padding: T.s6, color: T.textSec }}>Unknown category.</div>;
+    } else if (tab === "map") {
+      mainContent = <CategoryMap3D categoryId={cat.id} data={raw.data} />;
+      showTabs = true;
+    } else {
+      mainContent = (
+        <CategoryPage
+          category={cat}
+          raw={raw}
+          derived={derived}
+          tab={tab}
+          onTab={setTab}
+          preselect={preselect}
+          onPreselectConsumed={() => setPreselect(null)}
+        />
+      );
+      showTabs = true;
+    }
   }
 
   return (
@@ -80,48 +102,10 @@ export default function App() {
       sourceModified={raw.sourceModified}
       tab={tab}
       onTab={setTab}
-      showTabs={false}
+      showTabs={showTabs}
     >
-      {/* Content area fills the viewport minus the header; toggle sits on
-          top and the actual view takes the remaining space. */}
-      <div style={{ height: "calc(100vh - 80px)", display: "flex", flexDirection: "column", overflow: "hidden" }}>
-        {isCategoryView && <ViewToggle mode={viewMode} onChange={setViewMode} label={resolvedCat ? resolvedCat.label : ""} />}
-        <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
-          {mainContent}
-        </div>
-      </div>
+      {mainContent}
     </Layout>
-  );
-}
-
-function ViewToggle({ mode, onChange, label }) {
-  const btn = (id, txt) => (
-    <button onClick={() => onChange(id)} style={{
-      fontSize: 11, fontFamily: T.fontMono, letterSpacing: "0.08em",
-      padding: "5px 14px",
-      background: mode === id ? "rgba(94,106,210,0.22)" : "transparent",
-      color: mode === id ? T.text : T.textMuted,
-      border: "none", cursor: "pointer",
-      textTransform: "uppercase",
-    }}>{txt}</button>
-  );
-  return (
-    <div style={{
-      height: 38, flexShrink: 0,
-      display: "flex", alignItems: "center", justifyContent: "space-between",
-      padding: `0 ${T.s5}px`,
-      borderBottom: `1px solid ${T.borderHi}`,
-      background: T.bgCard,
-    }}>
-      <div style={{ fontFamily: T.fontMono, fontSize: 10, letterSpacing: "0.12em", color: T.textMuted, textTransform: "uppercase" }}>
-        {label}
-      </div>
-      <div style={{ display: "flex", alignItems: "center", border: `1px solid ${T.border}`, borderRadius: T.r_sm, overflow: "hidden" }}>
-        {btn("map", "3D Map")}
-        <div style={{ width: 1, height: 20, background: T.border }} />
-        {btn("list", "List")}
-      </div>
-    </div>
   );
 }
 
