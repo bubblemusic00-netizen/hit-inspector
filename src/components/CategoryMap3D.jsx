@@ -124,7 +124,49 @@ const MID_R      = 0.48;   // was 0.34 — too small to see
 const SMALL_R    = 0.2;    // was 0.11 — invisible without zooming in
 const ATTR_R     = 0.32;   // was 0.24 — matched up with mids
 const MID_ORBIT  = 5.0;
-const SMALL_ORBIT= 1.0;
+const SMALL_ORBIT= 1.8;    // was 1.0 — give micros breathing room so
+                           // they don't clip into the sub when scaled up
+
+// ── Musical note geometry ─────────────────────────────────────────
+// Unit-sized quarter note (♩). Head at origin, stem extends up-right.
+// Instances scale this per-tier via their `scale` prop, so we only
+// build the geometry once and share it across every node in the scene.
+function mergeTwoGeos(a, b) {
+  const na = a.index ? a.toNonIndexed() : a;
+  const nb = b.index ? b.toNonIndexed() : b;
+  const pa = na.getAttribute("position");
+  const pb = nb.getAttribute("position");
+  const nra = na.getAttribute("normal");
+  const nrb = nb.getAttribute("normal");
+  const total = pa.count + pb.count;
+  const pos = new Float32Array(total * 3);
+  const nrm = new Float32Array(total * 3);
+  pos.set(pa.array, 0);
+  pos.set(pb.array, pa.count * 3);
+  nrm.set(nra.array, 0);
+  nrm.set(nrb.array, pa.count * 3);
+  const merged = new THREE.BufferGeometry();
+  merged.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+  merged.setAttribute("normal", new THREE.BufferAttribute(nrm, 3));
+  merged.computeBoundingSphere();
+  return merged;
+}
+
+function makeNoteGeometry() {
+  // Note head — oval (ellipsoid), tilted so the stem looks attached to
+  // the top-right corner like a real quarter note.
+  const head = new THREE.SphereGeometry(1, 16, 12);
+  head.scale(1.3, 0.9, 0.9);
+  head.rotateZ(-Math.PI / 10); // ~18° tilt — standard musical-notation angle
+
+  // Stem — thin cylinder going up from the right edge of the head.
+  const stem = new THREE.CylinderGeometry(0.1, 0.1, 3.0, 8, 1);
+  stem.translate(1.08, 1.45, 0);
+
+  return mergeTwoGeos(head, stem);
+}
+
+const NOTE_GEOM = makeNoteGeometry();
 
 // ── Math helpers ─────────────────────────────────────────────────────
 function fibSphere(n) {
@@ -1046,16 +1088,17 @@ function BigNodes({ bigs, focused, layout, onSelect, onHover, sizeMult = 1, show
           (focused?.kind === "small" && focused.grandparent === b.name);
         const dim = focused && !isF && !related;
         return (
-          <group key={b.name} position={b.pos} scale={sizeMult}>
+          <group key={b.name} position={b.pos} scale={sizeMult * BIG_R}>
             <mesh
               onClick={e => { e.stopPropagation(); onSelect(b); }}
               onPointerOver={e => { e.stopPropagation(); onHover(b); }}
               onPointerOut={e => { e.stopPropagation(); onHover(null); }}
             >
-              <sphereGeometry args={[BIG_R, 32, 32]} />
+              <primitive object={NOTE_GEOM} attach="geometry" />
               <meshStandardMaterial
                 color={b.color} emissive={b.color}
                 emissiveIntensity={isF ? 2.6 : (dim ? 0.3 : 1.2)}
+                metalness={0.55} roughness={0.28}
                 toneMapped={false} opacity={dim ? 0.45 : 1} transparent={dim}
               />
             </mesh>
@@ -1083,15 +1126,15 @@ function MidNodes({ mids, focused, layout, onSelect, onHover, sizeMult = 1 }) {
   if (!mids.length) return null;
   return (
     <Instances limit={Math.max(mids.length, 1)} range={mids.length}>
-      <sphereGeometry args={[MID_R, 14, 14]} />
-      <meshStandardMaterial emissiveIntensity={0.9} toneMapped={false} />
+      <primitive object={NOTE_GEOM} attach="geometry" />
+      <meshStandardMaterial emissiveIntensity={1.0} metalness={0.55} roughness={0.3} toneMapped={false} />
       {mids.map(s => {
         const isF = focused?.kind === "mid" && focused.name === s.name && focused.parent === s.parent;
         const rel = isMidRelated(s, focused, layout);
         const dim = focused && !rel;
         const scl = isF ? 1.75 : (rel && focused ? 1.25 : (dim ? 0.35 : 1));
         return (
-          <Instance key={s.parent + "/" + s.name} position={s.pos} color={s.color} scale={scl * sizeMult}
+          <Instance key={s.parent + "/" + s.name} position={s.pos} color={s.color} scale={scl * sizeMult * MID_R}
             onPointerOver={e => { e.stopPropagation(); onHover(s); }}
             onPointerOut={e => { e.stopPropagation(); onHover(null); }}
             onClick={e => { e.stopPropagation(); onSelect(s); }} />
@@ -1105,8 +1148,8 @@ function SmallNodes({ smalls, focused, onSelect, onHover, sizeMult = 1 }) {
   if (!smalls.length) return null;
   return (
     <Instances limit={Math.max(smalls.length, 1)} range={smalls.length}>
-      <sphereGeometry args={[SMALL_R, 10, 10]} />
-      <meshStandardMaterial emissiveIntensity={0.7} toneMapped={false} />
+      <primitive object={NOTE_GEOM} attach="geometry" />
+      <meshStandardMaterial emissiveIntensity={0.85} metalness={0.5} roughness={0.32} toneMapped={false} />
       {smalls.map(m => {
         const isF = focused?.kind === "small" && focused.name === m.name && focused.parent === m.parent && focused.grandparent === m.grandparent;
         const inMid = focused?.kind === "mid" && focused.name === m.parent && focused.parent === m.grandparent;
@@ -1115,7 +1158,7 @@ function SmallNodes({ smalls, focused, onSelect, onHover, sizeMult = 1 }) {
         const scl = isF ? 2.4 : (inMid ? 1.35 : (dim ? 0.3 : 1));
         return (
           <Instance key={m.grandparent + "/" + m.parent + "/" + m.name}
-            position={m.pos} color={m.color} scale={scl * sizeMult}
+            position={m.pos} color={m.color} scale={scl * sizeMult * SMALL_R}
             onPointerOver={e => { e.stopPropagation(); onHover(m); }}
             onPointerOut={e => { e.stopPropagation(); onHover(null); }}
             onClick={e => { e.stopPropagation(); onSelect(m); }} />
@@ -1129,15 +1172,15 @@ function AttributeNodes({ attributes, focused, layout, onSelect, onHover, sizeMu
   if (!attributes.length) return null;
   return (
     <Instances limit={Math.max(attributes.length, 1)} range={attributes.length}>
-      <sphereGeometry args={[ATTR_R, 12, 12]} />
-      <meshStandardMaterial emissiveIntensity={0.9} toneMapped={false} />
+      <primitive object={NOTE_GEOM} attach="geometry" />
+      <meshStandardMaterial emissiveIntensity={1.0} metalness={0.5} roughness={0.3} toneMapped={false} />
       {attributes.map(a => {
         const isF = focused?.kind === "attribute" && focused.name === a.name && focused.categoryId === a.categoryId;
         const rel = isAttrRelated(a, focused, layout);
         const dim = focused && !isF && !rel;
         const scl = isF ? 2.2 : (rel && focused ? 1.4 : (dim ? 0.4 : 1));
         return (
-          <Instance key={a.categoryId + ":" + a.name} position={a.pos} color={a.color} scale={scl * sizeMult}
+          <Instance key={a.categoryId + ":" + a.name} position={a.pos} color={a.color} scale={scl * sizeMult * ATTR_R}
             onPointerOver={e => { e.stopPropagation(); onHover(a); }}
             onPointerOut={e => { e.stopPropagation(); onHover(null); }}
             onClick={e => { e.stopPropagation(); onSelect(a); }} />
@@ -1348,6 +1391,134 @@ function Dropdown({ value, onChange, options, placeholder }) {
   );
 }
 
+// Multi-select list — every item has a toggleable colored dot. The whole
+// list is scrollable so it scales to hundreds of subgenres without bloating
+// the panel. `selected` convention: `null` = everything shown, `Set` with
+// explicit values = only those shown (empty Set = nothing shown).
+function MultiSelectList({ items, selected, onChange, maxHeight = 170, query = "", onQuery }) {
+  const allValues = useMemo(() => items.map(i => i.value), [items]);
+  const isOn = (v) => !selected || selected.has(v);
+
+  const toggle = (v) => {
+    // Starting from "all" (null): first click picks ONLY that value.
+    // Otherwise toggle membership. If result equals full set → null.
+    let next;
+    if (!selected) {
+      next = new Set([v]);
+    } else if (selected.has(v)) {
+      next = new Set(selected);
+      next.delete(v);
+    } else {
+      next = new Set(selected);
+      next.add(v);
+    }
+    if (next && next.size === allValues.length) next = null;
+    onChange(next);
+  };
+  const selectAll = () => onChange(null);
+  const selectNone = () => onChange(new Set());
+
+  // Apply user's typed-in filter, if any.
+  const filtered = useMemo(() => {
+    const q = (query || "").trim().toLowerCase();
+    if (!q) return items;
+    return items.filter(it =>
+      it.label.toLowerCase().includes(q) ||
+      (it.group && it.group.toLowerCase().includes(q))
+    );
+  }, [items, query]);
+
+  // Count for display. If null, show total / total.
+  const selCount = selected ? selected.size : allValues.length;
+
+  return (
+    <div style={{ padding: "2px 10px 8px" }}>
+      <div style={{
+        display: "flex", alignItems: "center", justifyContent: "space-between",
+        marginBottom: 4,
+      }}>
+        <span style={{
+          fontSize: 9, fontFamily: T.fontMono, color: T.textMuted,
+          letterSpacing: ".06em",
+        }}>{selCount}/{allValues.length}</span>
+        <div style={{ display: "flex", gap: 10, fontSize: 9, fontFamily: T.fontMono, letterSpacing: ".06em" }}>
+          <span onClick={selectAll}
+            style={{ color: !selected ? T.text : T.textMuted, cursor: "pointer", textTransform: "uppercase" }}
+            onMouseEnter={e => e.currentTarget.style.color = T.text}
+            onMouseLeave={e => e.currentTarget.style.color = !selected ? T.text : T.textMuted}
+          >all</span>
+          <span onClick={selectNone}
+            style={{ color: (selected && selected.size === 0) ? T.text : T.textMuted, cursor: "pointer", textTransform: "uppercase" }}
+            onMouseEnter={e => e.currentTarget.style.color = T.text}
+            onMouseLeave={e => e.currentTarget.style.color = (selected && selected.size === 0) ? T.text : T.textMuted}
+          >none</span>
+        </div>
+      </div>
+      {onQuery !== undefined && (
+        <input
+          type="text"
+          value={query}
+          onChange={e => onQuery(e.target.value)}
+          placeholder="filter…"
+          style={{
+            width: "100%", boxSizing: "border-box",
+            padding: "4px 8px", marginBottom: 4,
+            background: "rgba(20,20,28,0.85)",
+            border: `1px solid ${T.borderHi}`, borderRadius: 4,
+            color: T.text, fontSize: 11, fontFamily: T.fontMono,
+            outline: "none",
+          }}
+        />
+      )}
+      <div style={{
+        maxHeight, overflowY: "auto",
+        border: `1px solid ${T.border}`, borderRadius: 4,
+        background: "rgba(14,14,22,0.65)",
+      }}>
+        {filtered.length === 0 && (
+          <div style={{
+            padding: "8px 10px", fontSize: 10, color: T.textMuted,
+            fontFamily: T.fontMono, textAlign: "center",
+          }}>no matches</div>
+        )}
+        {filtered.map(it => {
+          const on = isOn(it.value);
+          const dotColor = it.color || "#5E6AD2";
+          return (
+            <div
+              key={it.value}
+              onClick={() => toggle(it.value)}
+              style={{
+                display: "flex", alignItems: "center", gap: 7,
+                padding: "3px 7px", cursor: "pointer",
+                opacity: on ? 1 : 0.38,
+                fontSize: 11, fontFamily: T.fontMono,
+                borderBottom: `1px solid rgba(255,255,255,0.03)`,
+              }}
+              onMouseEnter={e => e.currentTarget.style.background = "rgba(94,106,210,0.14)"}
+              onMouseLeave={e => e.currentTarget.style.background = "transparent"}
+            >
+              <span style={{
+                width: 8, height: 8, borderRadius: "50%", flexShrink: 0,
+                background: on ? dotColor : "transparent",
+                border: `1.5px solid ${dotColor}`,
+              }} />
+              <span style={{ color: T.text, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {it.label}
+              </span>
+              {it.group && (
+                <span style={{ fontSize: 9, color: T.textMuted, letterSpacing: ".04em" }}>
+                  {it.group}
+                </span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function SearchBox({ value, onChange, results, onResultClick }) {
   return (
     <div style={{ padding: "2px 10px 6px" }}>
@@ -1532,29 +1703,50 @@ function LayerPanel({
     e.preventDefault();
   };
 
-  // Big options — always all bigs.
-  const bigOptions = layout.bigs.map(b => ({ value: b.name, label: b.name }));
+  // Big options — all bigs, color-tagged.
+  const bigItems = useMemo(() => layout.bigs.map(b => ({
+    value: b.name, label: b.name, color: b.color,
+  })), [layout.bigs]);
 
-  // Mid options depend on selected big (scope the list to subs under it).
-  const midOptions = useMemo(() => {
+  // Mid options — scoped to currently-filtered bigs (so picking "Hip-Hop"
+  // at the genre level narrows the subgenre list). Each item is tagged
+  // with its parent genre's color so it's visually grouped.
+  const midItems = useMemo(() => {
+    const bigColorByName = {};
+    for (const b of layout.bigs) bigColorByName[b.name] = b.color;
     let src = layout.mids;
-    if (filters.bigName) src = src.filter(m => m.parent === filters.bigName);
+    if (filters.bigs) src = src.filter(m => filters.bigs.has(m.parent));
     return src
-      .map(m => ({ value: m.name, label: m.name }))
+      .map(m => ({
+        value: m.name,
+        label: m.name,
+        group: m.parent,
+        color: bigColorByName[m.parent] || "#5E6AD2",
+      }))
       .sort((a, b) => a.label.localeCompare(b.label));
-  }, [layout.mids, filters.bigName]);
+  }, [layout.mids, layout.bigs, filters.bigs]);
 
-  const handleBigChange = (v) => {
+  // Local filter text for each list — keeps scrolling manageable
+  // when there are hundreds of subgenres.
+  const [bigQuery, setBigQuery] = useState("");
+  const [midQuery, setMidQuery] = useState("");
+
+  const setBigsFilter = (next) => {
     setFilters(f => {
-      // Changing the big invalidates the mid selection unless the mid
-      // still exists under the new big.
-      if (v && f.midName) {
-        const stillValid = layout.mids.some(m => m.parent === v && m.name === f.midName);
-        if (!stillValid) return { ...f, bigName: v, midName: null };
+      // If some mid in the current mids-set doesn't exist under any
+      // selected big, drop it so the state stays consistent.
+      if (next && f.mids) {
+        const allowedMidNames = new Set(
+          layout.mids.filter(m => next.has(m.parent)).map(m => m.name)
+        );
+        const prunedMids = new Set();
+        for (const v of f.mids) if (allowedMidNames.has(v)) prunedMids.add(v);
+        return { ...f, bigs: next, mids: prunedMids.size === 0 ? null : prunedMids };
       }
-      return { ...f, bigName: v };
+      return { ...f, bigs: next };
     });
   };
+  const setMidsFilter = (next) => setFilters(f => ({ ...f, mids: next }));
 
   const pctFmt  = v => (v * 100).toFixed(0) + "%";
   const multFmt = v => v.toFixed(1) + "×";
@@ -1612,7 +1804,8 @@ function LayerPanel({
         color: T.textMuted, textTransform: "uppercase",
         marginBottom: 2, fontFamily: T.fontMono,
       }}>show</div>
-      <Toggle on label={`${layout.bigLabel} (big)`} color="#A78BFA" disabled />
+      <Toggle on={layers.bigs} label={`${layout.bigLabel} (big)`} color="#A78BFA"
+        onChange={v => setLayers(l => ({ ...l, bigs: v }))} />
       <Toggle on={layers.mids} label={`${layout.midLabel} (mid)`} color="#60A5FA"
         onChange={v => setLayers(l => ({ ...l, mids: v, smalls: !v ? false : l.smalls }))} />
       {layout.hasSmalls && (
@@ -1668,11 +1861,11 @@ function LayerPanel({
         onResultClick={onSearchResultClick}
       />
 
-      {/* ── ISOLATE ─────────────────────────────────────────── */}
+      {/* ── FILTER ─────────────────────────────────────────── */}
       <SectionLabel action={
-        (filters.bigName || filters.midName) ? (
+        (filters.bigs || filters.mids) ? (
           <span
-            onClick={() => setFilters(f => ({ ...f, bigName: null, midName: null }))}
+            onClick={() => setFilters(f => ({ ...f, bigs: null, mids: null }))}
             style={{
               fontSize: 9, color: T.textMuted, cursor: "pointer",
               fontFamily: T.fontMono, letterSpacing: ".1em",
@@ -1681,20 +1874,28 @@ function LayerPanel({
             onMouseLeave={e => e.currentTarget.style.color = T.textMuted}
           >clear</span>
         ) : null
-      }>isolate</SectionLabel>
-      <Dropdown
-        value={filters.bigName}
-        onChange={handleBigChange}
-        options={bigOptions}
-        placeholder={`All ${layout.bigLabel.toLowerCase()}s`}
+      }>filter {layout.bigLabel.toLowerCase()}s</SectionLabel>
+      <MultiSelectList
+        items={bigItems}
+        selected={filters.bigs}
+        onChange={setBigsFilter}
+        maxHeight={160}
+        query={bigQuery}
+        onQuery={setBigQuery}
       />
+
       {layers.mids && (
-        <Dropdown
-          value={filters.midName}
-          onChange={v => setFilters(f => ({ ...f, midName: v }))}
-          options={midOptions}
-          placeholder={`All ${layout.midLabel.toLowerCase()}s`}
-        />
+        <>
+          <SectionLabel>filter {layout.midLabel.toLowerCase()}s</SectionLabel>
+          <MultiSelectList
+            items={midItems}
+            selected={filters.mids}
+            onChange={setMidsFilter}
+            maxHeight={180}
+            query={midQuery}
+            onQuery={setMidQuery}
+          />
+        </>
       )}
 
       {/* ── ATTRIBUTES ──────────────────────────────────────── */}
@@ -1888,6 +2089,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
   const layout = useMemo(() => buildLayout(categoryId, data || {}), [categoryId, data]);
 
   const [layers, setLayers] = useState({
+    bigs: true,
     mids: true,
     smalls: layout.hasSmalls && categoryId === "microstyles",
     attributes: layout.hasAttrs,
@@ -1899,9 +2101,13 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
   const [interacting, setInteracting] = useState(false);
   const [resetCount, setResetCount] = useState(0);
 
-  // Filtering panel — lets the user isolate a specific big/mid and restrict
-  // attrs to specific categories. `null` means "no filter" for that slot.
-  const [filters, setFilters] = useState({ bigName: null, midName: null, attrCats: null });
+  // Filtering panel — multi-select membership sets. `null` = all shown
+  // (no filter). Explicit `Set` = only those values pass the filter. An
+  // empty Set means "show nothing at this tier", which is a valid state.
+  //   bigs:     Set<string> of genre/family/hub names to keep
+  //   mids:     Set<string> of sub/item names to keep
+  //   attrCats: Set<string> of attribute category ids (moods / grooves …)
+  const [filters, setFilters] = useState({ bigs: null, mids: null, attrCats: null });
   const [search, setSearch] = useState("");
 
   // ── Fine-grain customization ─────────────────────────────────────
@@ -1923,13 +2129,14 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
     setFocused(null);
     setHovered(null);
     setLayers({
+      bigs: true,
       mids: true,
       smalls: layout.hasSmalls && categoryId === "microstyles",
       attributes: layout.hasAttrs,
     });
     setLinesMode("auto");
     setAutoRotate(false);
-    setFilters({ bigName: null, midName: null, attrCats: null });
+    setFilters({ bigs: null, mids: null, attrCats: null });
     setSearch("");
   }, [categoryId, layout.hasSmalls, layout.hasAttrs]);
 
@@ -1948,23 +2155,23 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
 
   // ── Visible lists (filters applied) ──────────────────────────────
   const visibleBigs = useMemo(() => {
-    if (!filters.bigName) return layout.bigs;
-    return layout.bigs.filter(b => b.name === filters.bigName);
-  }, [layout.bigs, filters.bigName]);
+    if (!filters.bigs) return layout.bigs;
+    return layout.bigs.filter(b => filters.bigs.has(b.name));
+  }, [layout.bigs, filters.bigs]);
 
   const visibleMids = useMemo(() => {
     let mids = layout.mids;
-    if (filters.bigName) mids = mids.filter(m => m.parent === filters.bigName);
-    if (filters.midName) mids = mids.filter(m => m.name === filters.midName);
+    if (filters.bigs) mids = mids.filter(m => filters.bigs.has(m.parent));
+    if (filters.mids) mids = mids.filter(m => filters.mids.has(m.name));
     return mids;
-  }, [layout.mids, filters.bigName, filters.midName]);
+  }, [layout.mids, filters.bigs, filters.mids]);
 
   const visibleSmalls = useMemo(() => {
     let smalls = layout.smalls;
-    if (filters.bigName) smalls = smalls.filter(s => s.grandparent === filters.bigName);
-    if (filters.midName) smalls = smalls.filter(s => s.parent === filters.midName);
+    if (filters.bigs) smalls = smalls.filter(s => filters.bigs.has(s.grandparent));
+    if (filters.mids) smalls = smalls.filter(s => filters.mids.has(s.parent));
     return smalls;
-  }, [layout.smalls, filters.bigName, filters.midName]);
+  }, [layout.smalls, filters.bigs, filters.mids]);
 
   const visibleAttributes = useMemo(() => {
     if (!filters.attrCats) return layout.attributes;
@@ -2000,7 +2207,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
     const out = [];
     for (const m of visibleMids) {
       const parent = layout.bigByName?.[m.parent];
-      if (parent?.pos && m.pos && (!filters.bigName || parent.name === filters.bigName)) {
+      if (parent?.pos && m.pos && (!filters.bigs || filters.bigs.has(parent.name))) {
         out.push({ from: parent.pos, to: m.pos, color: m.color || parent.color });
       }
     }
@@ -2015,7 +2222,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
       }
     }
     return out;
-  }, [visibleMids, visibleSmalls, layout, layers.smalls, layers.mids, filters.bigName]);
+  }, [visibleMids, visibleSmalls, layout, layers.smalls, layers.mids, filters.bigs]);
 
   const selectBig   = b => setFocused({ kind: "big",       name: b.name, pos: b.pos });
   const selectMid   = s => setFocused({ kind: "mid",       name: s.name, parent: s.parent, pos: s.pos });
@@ -2024,7 +2231,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
 
   const handleReset = () => {
     setFocused(null);
-    setFilters({ bigName: null, midName: null, attrCats: null });
+    setFilters({ bigs: null, mids: null, attrCats: null });
     setSearch("");
     setResetCount(c => c + 1);
   };
@@ -2069,8 +2276,10 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
             <Stars radius={300} depth={90} count={bgStars.count} factor={4} saturation={0} fade speed={bgStars.speed} />
           )}
 
-          <BigNodes bigs={visibleBigs} focused={focused} layout={layout} onSelect={selectBig} onHover={setHovered}
-                    sizeMult={nodeSizes.big} showLabel={labelOpts.bigLabels} />
+          {layers.bigs && (
+            <BigNodes bigs={visibleBigs} focused={focused} layout={layout} onSelect={selectBig} onHover={setHovered}
+                      sizeMult={nodeSizes.big} showLabel={labelOpts.bigLabels} />
+          )}
 
           {layers.mids && (
             <MidNodes mids={visibleMids} focused={focused} layout={layout} onSelect={selectMid} onHover={setHovered}
@@ -2117,7 +2326,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
         onResetCustomization={handleResetCustomization}
       />
       <StatsBadge layout={layout} focused={focused} />
-      <ResetViewButton onReset={handleReset} hasFocus={!!focused || !!filters.bigName || !!filters.midName || !!filters.attrCats} />
+      <ResetViewButton onReset={handleReset} hasFocus={!!focused || !!filters.bigs || !!filters.mids || !!filters.attrCats} />
       <FocusHUD focused={focused} onClear={() => setFocused(null)} layout={layout} />
     </div>
   );
