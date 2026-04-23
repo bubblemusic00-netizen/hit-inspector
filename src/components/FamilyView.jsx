@@ -3,6 +3,29 @@ import { T } from "../theme.js";
 import { LINGUISTIC_FAMILIES, MUSIC_CONTEXT_CLUSTERS } from "../language-families.js";
 import { useIsMobile } from "../responsive.js";
 
+// Display order + pretty labels for fields inside complement-table entries.
+// This is used by the non-tree Family view (Moods, Energies, Grooves,
+// Vocalists, Lyrical Vibes, Harmonics, Textures, Mixes).  The enrichment
+// script adds `genres`, `subs`, `micros`, and same-category pairings; this
+// order keeps the display readable and consistent across every table.
+const COMPLEMENT_FIELD_LABELS = {
+  mood:        "MOOD",
+  energy:      "ENERGY",
+  groove:      "GROOVE",
+  harmonic:    "HARMONIC",
+  texture:     "TEXTURE",
+  mix:         "MIX",
+  vocalist:    "VOCALIST",
+  lyricalVibe: "LYRICAL VIBE",
+  genres:      "GENRES",
+  subs:        "SUB-GENRES",
+  micros:      "MICRO-STYLES",
+};
+const COMPLEMENT_FIELD_ORDER = [
+  "mood", "energy", "groove", "harmonic", "texture", "mix",
+  "vocalist", "lyricalVibe", "genres", "subs", "micros",
+];
+
 export default function FamilyView({
   category, items, raw, derived,
   preselect, onPreselectConsumed,
@@ -113,34 +136,64 @@ export default function FamilyView({
           pairings will be less curated.
         </div>
       </div>
-    ) : (
-      <div>
-        <div style={{
-          fontFamily: T.fontSans, fontSize: 16, fontWeight: 600, color: T.text,
-          marginBottom: T.s4,
-        }}>Pairings for <span style={{ color: T.accent }}>{selected}</span></div>
-        {Object.entries(entry).map(([field, values]) => (
-          <div key={field} style={{ marginBottom: T.s4 }}>
+    ) : (() => {
+      // Build an ordered list: known fields first (in COMPLEMENT_FIELD_ORDER),
+      // any unknown fields appended at the end as a fallback.
+      const rows = [];
+      const knownKeys = new Set(COMPLEMENT_FIELD_ORDER);
+      for (const key of COMPLEMENT_FIELD_ORDER) {
+        const v = entry[key];
+        if (Array.isArray(v) && v.length > 0) rows.push({ key, values: v });
+      }
+      for (const [key, v] of Object.entries(entry)) {
+        if (knownKeys.has(key)) continue;
+        if (Array.isArray(v) && v.length > 0) rows.push({ key, values: v });
+      }
+      return (
+        <div>
+          <div style={{
+            display: "flex", alignItems: "baseline", gap: T.s3,
+            marginBottom: T.s4,
+          }}>
             <div style={{
-              fontFamily: T.fontMono, fontSize: 10,
-              color: T.textMuted, letterSpacing: "0.2em",
-              textTransform: "uppercase", marginBottom: T.s2,
-            }}>{field}</div>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-              {(Array.isArray(values) ? values : [values]).map((v, i) => (
-                <span key={`${v}-${i}`} style={{
-                  padding: `5px 10px`,
-                  background: T.bgSurface,
-                  border: `1px solid ${T.borderHi}`,
-                  borderRadius: T.r_sm,
-                  color: T.text, fontSize: 12, fontFamily: T.fontMono, lineHeight: 1.3,
-                }}>{v}</span>
-              ))}
-            </div>
+              fontFamily: T.fontSans, fontSize: 16, fontWeight: 600, color: T.text,
+            }}>Pairings for <span style={{ color: T.accent }}>{selected}</span></div>
+            <div style={{
+              fontFamily: T.fontMono, fontSize: 11,
+              color: T.textMuted, letterSpacing: "0.1em",
+            }}>· {rows.length} fields</div>
           </div>
-        ))}
-      </div>
-    )
+          {rows.map(({ key, values }) => (
+            <div key={key} style={{ marginBottom: T.s4 }}>
+              <div style={{
+                display: "flex", alignItems: "baseline", gap: T.s2,
+                marginBottom: T.s2,
+              }}>
+                <span style={{
+                  fontFamily: T.fontMono, fontSize: 10,
+                  color: T.textMuted, letterSpacing: "0.2em",
+                  textTransform: "uppercase", fontWeight: 600,
+                }}>{COMPLEMENT_FIELD_LABELS[key] || key.replace(/([A-Z])/g, " $1").toUpperCase()}</span>
+                <span style={{
+                  fontFamily: T.fontMono, fontSize: 10, color: T.textDim,
+                }}>· {values.length}</span>
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {values.map((v, i) => (
+                  <span key={`${v}-${i}`} style={{
+                    padding: `5px 10px`,
+                    background: T.bgSurface,
+                    border: `1px solid ${T.borderHi}`,
+                    borderRadius: T.r_sm,
+                    color: T.text, fontSize: 12, fontFamily: T.fontMono, lineHeight: 1.3,
+                  }}>{v}</span>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      );
+    })()
   );
 
   // ─── MOBILE: list-detail pattern ───
@@ -639,6 +692,8 @@ function TreeDetail({ category, data, selected, raw }) {
       { key: "harmonics",          label: "HARMONIC" },
       { key: "textures",           label: "TEXTURE" },
       { key: "mixes",              label: "MIX" },
+      { key: "vocalists",          label: "VOCALIST" },
+      { key: "lyricalVibes",       label: "LYRICAL VIBE" },
       { key: "instrumentKeywords", label: "INSTRUMENT KEYWORDS" },
     ];
     const bpm = Array.isArray(resolved.bpmRange) && resolved.bpmRange.length === 2
