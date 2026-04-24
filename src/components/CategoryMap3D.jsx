@@ -1703,6 +1703,7 @@ function MidNodes({ mids, focused, layout, onSelect, onHover, onCopy, sizeMult =
     <>
       <instancedMesh
         ref={meshRef}
+        key={`mesh-mid-${mids.length}`}
         args={[undefined, undefined, mids.length]}
         onClick={e => { e.stopPropagation(); if (e.instanceId != null) onSelect(mids[e.instanceId]); }}
         onContextMenu={e => { e.stopPropagation(); if (e.instanceId != null) onCopy?.(mids[e.instanceId].name); }}
@@ -1835,6 +1836,7 @@ function SmallNodes({ smalls, focused, onSelect, onHover, onCopy, sizeMult = 1, 
     <>
       <instancedMesh
         ref={meshRef}
+        key={`mesh-small-${smalls.length}`}
         args={[undefined, undefined, smalls.length]}
         onClick={e => { e.stopPropagation(); if (e.instanceId != null) onSelect(smalls[e.instanceId]); }}
         onContextMenu={e => { e.stopPropagation(); if (e.instanceId != null) onCopy?.(smalls[e.instanceId].name); }}
@@ -1928,6 +1930,7 @@ function AttributeNodes({ attributes, focused, layout, onSelect, onHover, onCopy
     <>
       <instancedMesh
         ref={meshRef}
+        key={`mesh-attr-${attributes.length}`}
         args={[undefined, undefined, attributes.length]}
         onClick={e => { e.stopPropagation(); if (e.instanceId != null) onSelect(attributes[e.instanceId]); }}
         onContextMenu={e => {
@@ -2440,10 +2443,18 @@ function computeFocusPairings(focused, layout) {
   return out;
 }
 
-// FocusHologram — info HUD anchored to the focused star in 3D space.
-// Floats beside-and-above the star so it tracks with camera view but
-// offsets so as not to cover the star itself. Visual read is laser /
-// neon text: transparent background, heavy text-shadow glow.
+// FocusHologram — info HUD rendered as a billboarded 3D plane
+// floating next to the focused star. Anchored in world space via
+// <Html transform sprite>, so it scales with camera distance and
+// moves with the star in 3D — not a screen-fixed overlay. When the
+// camera flies past, orbits to the back, or zooms far out, the
+// hologram moves or fades with the star, the "object near the
+// star" feel the user asked for. Transparent background, heavy
+// text-shadow glow → laser / neon read.
+//
+// Layout is 2-column landscape: wide (440px) but height-capped
+// (300px) so dense pairing lists don't produce a tall portrait
+// panel that overhangs the star.
 //
 // Typing animation runs across ALL text (name + category headers +
 // items), not just the name. A single rAF loop walks chunks in order:
@@ -2551,19 +2562,26 @@ const FocusHologram = React.memo(function FocusHologram({ focused, layout, liveP
 
   return (
     <group ref={groupRef}>
-      {/* Html without distanceFactor → text stays screen-space-sized.
-          Star can be near or far; HUD stays readable. center={false}
-          anchors the div's top-left at the projected screen point;
-          the inner transform then lifts and shifts it beside the
-          star so the star itself is not covered. */}
-      <Html center={false} zIndexRange={[200, 120]} style={{ pointerEvents: "none" }}>
+      {/* Html with transform + sprite: renders as a billboarded 3D
+          plane offset from the star. distanceFactor scales the DOM
+          with camera distance, so focus distance ≈ normal reading
+          size. Because it lives in world space rather than a fixed
+          screen corner, camera movement (WASD fly-past, orbit to the
+          back side, Neural zoom-out) naturally moves or hides the
+          hologram — the "object floating near the star" feel the
+          user asked for. */}
+      <Html
+        transform
+        sprite
+        distanceFactor={8}
+        position={[3, 1.5, 0]}
+        zIndexRange={[200, 120]}
+        style={{ pointerEvents: "none" }}
+      >
         <div style={{
-          // Beside-and-above the star: 60px to the right, lifted up
-          // by most of the div's height so content sits above the
-          // anchor rather than draped over it.
-          transform: "translate(60px, -60%)",
-          position: "absolute",
-          width: 280,
+          width: 440,
+          maxHeight: 300,
+          overflow: "hidden",
           color: MATRIX,
           fontFamily: "ui-monospace, 'Geist Mono', 'SF Mono', Menlo, monospace",
           userSelect: "none",
@@ -2596,13 +2614,13 @@ const FocusHologram = React.memo(function FocusHologram({ focused, layout, liveP
 
           {/* Name + caret */}
           <div style={{
-            fontSize: 20, fontWeight: 800, letterSpacing: "0.08em",
+            fontSize: 22, fontWeight: 800, letterSpacing: "0.08em",
             textTransform: "uppercase",
             textShadow:
               `0 0 6px ${MATRIX}, ` +
               `0 0 16px rgba(57,255,65,0.7), ` +
               `0 0 32px rgba(57,255,65,0.4)`,
-            minHeight: 26,
+            minHeight: 28,
             lineHeight: 1.2,
             marginBottom: 12,
             wordBreak: "break-word",
@@ -2610,7 +2628,7 @@ const FocusHologram = React.memo(function FocusHologram({ focused, layout, liveP
             <span ref={el => { chunkRefsRef.current['name'] = el; }} />
             <span style={{
               display: "inline-block",
-              width: 10, height: 18,
+              width: 11, height: 20,
               marginLeft: 3, marginBottom: -2,
               background: MATRIX,
               boxShadow: `0 0 8px ${MATRIX}`,
@@ -2619,7 +2637,10 @@ const FocusHologram = React.memo(function FocusHologram({ focused, layout, liveP
             }} />
           </div>
 
-          {/* Pairings */}
+          {/* Pairings — 2-column grid. Groups flow row-by-row across
+              the columns, so category headers stay paired with their
+              item list in the same column. Row-gap keeps vertical
+              rhythm; column-gap separates the two columns cleanly. */}
           {pairings.length === 0 ? (
             <div style={{
               fontSize: 10, opacity: 0.55, letterSpacing: "0.18em",
@@ -2629,9 +2650,14 @@ const FocusHologram = React.memo(function FocusHologram({ focused, layout, liveP
               » no pairings indexed
             </div>
           ) : (
-            <div>
+            <div style={{
+              display: "grid",
+              gridTemplateColumns: "1fr 1fr",
+              columnGap: 20,
+              rowGap: 8,
+            }}>
               {pairings.map((group, gi) => (
-                <div key={group.key} style={{ marginBottom: 9 }}>
+                <div key={group.key}>
                   <div style={{
                     fontSize: 9, letterSpacing: "0.26em",
                     opacity: 0.72, textTransform: "uppercase",
@@ -2725,7 +2751,7 @@ function HoverTooltip({ hovered, focused = null, livePosRef = null }) {
 // zoom). Without this cancel, the lerp pulls camera + target back each
 // frame while the user's input is fighting to move them — producing
 // the "stuck, snaps back, works again after a few seconds" symptom.
-function CameraRig({ focusTarget, cameraGoto, controlsRef, animatingRef, syncAnimating, followingRef, livePosRef }) {
+function CameraRig({ focusTarget, cameraGoto, controlsRef, animatingRef, syncAnimating, followingRef, livePosRef, autoRotate }) {
   const { camera } = useThree();
   const destPos = useRef(new THREE.Vector3(0, 30, 230));
   const destTgt = useRef(new THREE.Vector3());
@@ -2790,10 +2816,18 @@ function CameraRig({ focusTarget, cameraGoto, controlsRef, animatingRef, syncAni
     const travelDist = camera.position.distanceTo(destPos.current);
     // Duration floor keeps short hops readable (otherwise a 5-unit
     // small-to-small switch completes in two frames); ceiling keeps
-    // long Neural trips from feeling endless. Range 1.0-2.5s so the
-    // two-phase easing has room to breathe: rotate phase gets ~0.5s
-    // min, approach phase ~0.55s min, which reads as unhurried flow.
-    anim.current.duration = Math.max(1.0, Math.min(2.5, 0.9 + travelDist / 80));
+    // long Neural trips from feeling endless. Range 1.3-3.5s so the
+    // two-phase easing has plenty of room: rotate phase gets ~0.65s
+    // min, approach phase ~0.7s min — reads as a very deliberate glide.
+    //
+    // autoRotate slowdown: when the user had the galaxy spinning
+    // before the click, the perceived-motion context was "slow drift".
+    // A normal-speed fly-in on top of that reads as abrupt. Scaling
+    // duration by 1.3× when auto-rotate is on restores continuity —
+    // the camera arrives with the same lazy pace the user was
+    // already seeing in the background motion.
+    const baseDuration = Math.max(1.3, Math.min(3.5, 1.1 + travelDist / 70));
+    anim.current.duration = baseDuration * (autoRotate ? 1.3 : 1.0);
 
     // Control point for quadratic Bezier: midpoint pushed outward
     // from the galaxy center by a fraction of travel distance. The
@@ -2816,6 +2850,11 @@ function CameraRig({ focusTarget, cameraGoto, controlsRef, animatingRef, syncAni
     if (!focusTarget) { setAnimating(false); if (followingRef) followingRef.current = false; flyInComplete.current = false; return; }
     const p = focusTarget.pos;
     if (!p) return;
+    // Reset camera.up to world-up. FPS drag may have tilted it for
+    // free-exploration; focus is always a "canonical upright" view.
+    // Applied before seedFlyIn so the animation's per-frame lookAt
+    // uses world-up throughout → camera lands upright at the star.
+    camera.up.set(0, 1, 0);
     const t = new THREE.Vector3(...p);
     destTgt.current.copy(t);
     const dist = focusTarget.kind === "big" ? 22 : focusTarget.kind === "mid" ? 9 : focusTarget.kind === "small" ? 4.5 : 8;
@@ -2847,6 +2886,10 @@ function CameraRig({ focusTarget, cameraGoto, controlsRef, animatingRef, syncAni
 
   useEffect(() => {
     if (!cameraGoto || cameraGoto.n === 0) return;
+    // Same rationale as focus effect above — Dive In / Neural / any
+    // explicit goto is a canonical-view reset, so any FPS-drag tilt
+    // on camera.up must be cleared before the fly-in starts.
+    camera.up.set(0, 1, 0);
     destPos.current.set(cameraGoto.pos[0], cameraGoto.pos[1], cameraGoto.pos[2]);
     destTgt.current.set(cameraGoto.tgt[0], cameraGoto.tgt[1], cameraGoto.tgt[2]);
     seedFlyIn();
@@ -3105,6 +3148,7 @@ function FpsDragView({ controlsRef, releaseFollow, syncAnimating, onInteractingC
     // runs every move, allocating a Spherical per tick showed up in
     // profiler as measurable GC pressure.
     const forward = new THREE.Vector3();
+    const localUp = new THREE.Vector3();
     const orbitOffset = new THREE.Vector3();
     const orbitSpherical = new THREE.Spherical();
 
@@ -3173,20 +3217,20 @@ function FpsDragView({ controlsRef, releaseFollow, syncAnimating, onInteractingC
       }
 
       // ── FPS mode ──────────────────────────────────────────────────
-      // Accumulate yaw on .y (around world-up) and pitch on .x.
-      // Yaw wraps freely; pitch is clamped just shy of ±90° to keep
-      // the camera out of the gimbal zone. Past ±90° the YXZ Euler
-      // flips the camera upside-down AND OrbitControls.update()'s
-      // built-in camera.lookAt(target) starts fighting our quaternion
-      // every frame (its cross(up, z) goes degenerate), which reads
-      // as the galaxy tumbling/spazzing.
-      const PITCH_LIMIT = Math.PI / 2 - 0.02;
+      // Yaw on .y, pitch on .x — both accumulate freely (no clamp).
+      // The old code clamped pitch just shy of ±90° because past that
+      // OrbitControls.update()'s per-frame camera.lookAt(target) used
+      // world-up and "corrected" the camera back to upright every
+      // frame, reading as a tumble. Fix: sync camera.up to the
+      // camera's own local up after each drag step — lookAt then
+      // preserves whatever orientation the user dragged to, including
+      // fully inverted views. Rolling past the zenith / nadir feels
+      // natural, like a spaceship camera.
       eulerRef.current.y -= dx * SENS;
-      eulerRef.current.x = Math.max(
-        -PITCH_LIMIT,
-        Math.min(PITCH_LIMIT, eulerRef.current.x - dy * SENS),
-      );
+      eulerRef.current.x -= dy * SENS;
       camera.quaternion.setFromEuler(eulerRef.current);
+      localUp.set(0, 1, 0).applyQuaternion(camera.quaternion);
+      camera.up.copy(localUp);
       camera.updateMatrixWorld();
 
       // Re-anchor target to the point directly in front of the
@@ -3264,6 +3308,14 @@ function AutoSpinAroundY({ active, rotateSpeed, controlsRef }) {
     const tx = controls.target.x, tz = controls.target.z;
     controls.target.x = tx * c + tz * s;
     controls.target.z = -tx * s + tz * c;
+
+    // Rotate camera.up too, so if FPS drag left it off world-Y the
+    // spin stays consistent with lookAt's reference frame (otherwise
+    // OrbitControls.update()'s per-frame lookAt would drift against
+    // the rotating quaternion).
+    const ux = camera.up.x, uz = camera.up.z;
+    camera.up.x = ux * c + uz * s;
+    camera.up.z = -ux * s + uz * c;
 
     tmpQuat.current.setFromAxisAngle(axis.current, angle);
     camera.quaternion.premultiply(tmpQuat.current);
@@ -3723,7 +3775,7 @@ function LayerPanel({
   onResetCustomization,
 }) {
   const [pos, setPos] = useState({ x: 16, y: 16 });
-  const [tab, setTab] = useState("view"); // view | filter | style
+  const [tab, setTab] = useState("style"); // view | filter | style  (labels: Stars | Filter | Lines)
   const [minimized, setMinimized] = useState(false);
   const dragStart = useRef(null);
 
@@ -3831,9 +3883,9 @@ function LayerPanel({
   const multFmt = v => v.toFixed(1) + "×";
 
   const tabs = [
-    { id: "view",   label: "View" },
-    { id: "filter", label: "Filter" },
-    { id: "style",  label: "Style" },
+    { id: "view",   label: "Stars"  },  // layers, labels, sizes
+    { id: "filter", label: "Filter" },  // catalog filters
+    { id: "style",  label: "Lines"  },  // connections + rotation (default)
   ];
 
   const activeFilterCount =
@@ -3847,7 +3899,12 @@ function LayerPanel({
     <div style={{
       position: "absolute", top: pos.y, left: pos.x,
       width: 276,
-      maxHeight: "calc(100vh - 140px)",
+      // Dynamic height cap — accounts for current vertical position so
+      // dragging the panel down doesn't push its bottom edge past the
+      // viewport (which is how content ends up "cut off" visually, no
+      // scrollbar reachable). 40px bottom margin keeps the panel from
+      // kissing the screen edge.
+      maxHeight: `calc(100vh - ${pos.y + 40}px)`,
       overflow: "hidden", display: "flex", flexDirection: "column",
       background: "rgba(10,10,15,0.94)",
       border: `1px solid ${T.borderHi}`,
@@ -4192,25 +4249,25 @@ function CenterButton({ onCenter }) {
       onClick={onCenter}
       title="Jump to the center of the galaxy"
       style={{
-        background: "rgba(94,106,210,0.22)",
-        border: `1px solid ${T.accent}`,
+        background: "rgba(20,184,166,0.18)",
+        border: `1px solid #14B8A6`,
         borderRadius: T.r_md, padding: "10px 22px", cursor: "pointer",
         color: T.text, fontSize: 13, fontFamily: T.fontMono, fontWeight: 600,
         letterSpacing: ".18em", textTransform: "uppercase", userSelect: "none",
         display: "flex", alignItems: "center", gap: 10,
         transition: "background 120ms, transform 120ms, box-shadow 120ms",
-        boxShadow: "0 4px 20px rgba(94,106,210,0.35)",
+        boxShadow: "0 4px 20px rgba(20,184,166,0.28)",
       }}
       onMouseEnter={e => {
-        e.currentTarget.style.background = "rgba(94,106,210,0.38)";
+        e.currentTarget.style.background = "rgba(20,184,166,0.32)";
         e.currentTarget.style.transform = "scale(1.05)";
       }}
       onMouseLeave={e => {
-        e.currentTarget.style.background = "rgba(94,106,210,0.22)";
+        e.currentTarget.style.background = "rgba(20,184,166,0.18)";
         e.currentTarget.style.transform = "scale(1)";
       }}
     >
-      <span style={{ fontSize: 15, lineHeight: 1 }}>⊙</span>
+      <span style={{ fontSize: 15, lineHeight: 1, color: "#14B8A6" }}>⊙</span>
       <span>Dive in</span>
     </div>
   );
@@ -4470,7 +4527,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
     attr:  "auto",  // attributes
   });
   const [lineOpacity, setLineOpacity] = useState(0.5);   // 0 = invisible, 1 = full
-  const [allLinesOpacity, setAllLinesOpacity] = useState(0.08); // base for "on" mode
+  const [allLinesOpacity, setAllLinesOpacity] = useState(0.06); // base for "on" mode
   const [rotateSpeed, setRotateSpeed] = useState(0.08);  // very slow — full rotation ~10 min
   const [bgStars, setBgStars] = useState({ on: true, count: 2000, speed: 0.2 });
 
@@ -4810,6 +4867,40 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
     if (!focusOverride) return [];
     return visibleAttributes.filter(a => focusOverride.attrs.has(attrKey(a)));
   }, [layout.hasAttrs, layers.attributes, visibleAttributes, focusOverride]);
+
+  // ── Isolation-narrowed rendered lists ────────────────────────────
+  // When isolated is set, ALL on-screen content collapses to just
+  // that one node. Its tier keeps the node; every other tier renders
+  // empty. These soloX lists shadow renderedX for JSX; upstream
+  // logic (pairings, random pool, pending focus target) keeps using
+  // renderedX so behavior resumes cleanly on isolation exit.
+  const soloBigs = useMemo(() => {
+    if (!isolated) return renderedBigs;
+    if (isolated.kind !== "big") return [];
+    return renderedBigs.filter(b => b.name === isolated.name);
+  }, [isolated, renderedBigs]);
+
+  const soloMids = useMemo(() => {
+    if (!isolated) return renderedMids;
+    if (isolated.kind !== "mid") return [];
+    return renderedMids.filter(m => m.name === isolated.name && m.parent === isolated.parent);
+  }, [isolated, renderedMids]);
+
+  const soloSmalls = useMemo(() => {
+    if (!isolated) return renderedSmalls;
+    if (isolated.kind !== "small") return [];
+    return renderedSmalls.filter(s =>
+      s.name === isolated.name && s.parent === isolated.parent && s.grandparent === isolated.grandparent
+    );
+  }, [isolated, renderedSmalls]);
+
+  const soloAttributes = useMemo(() => {
+    if (!isolated) return renderedAttributes;
+    if (isolated.kind !== "attribute") return [];
+    return renderedAttributes.filter(a =>
+      a.categoryId === isolated.categoryId && a.name === isolated.name
+    );
+  }, [isolated, renderedAttributes]);
 
   // ── Edge-scoped visibility (filter+layer, NOT focus) ─────────────
   // CRITICAL for smooth focus transitions. Previously allEdges used
@@ -5270,10 +5361,52 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
     return out;
   }, [edgeBigs, edgeMids, edgeSmalls, edgeAttributes, layout, midPairCache]);
 
-  const selectBig   = b => setFocused({ kind: "big",       name: b.name, pos: b.pos });
-  const selectMid   = s => setFocused({ kind: "mid",       name: s.name, parent: s.parent, pos: s.pos });
-  const selectSmall = m => setFocused({ kind: "small",     name: m.name, parent: m.parent, grandparent: m.grandparent, pos: m.pos });
-  const selectAttr  = a => setFocused({ kind: "attribute", name: a.name, label: a.label, categoryId: a.categoryId, pos: a.pos });
+  // Isolation (solo view): double-click a star to hide everything else,
+  // double-click again to restore. Second double-click target can be
+  // the same star (most intuitive toggle) — dblclick detection is by
+  // per-node timestamp so only same-node repeats count. Isolation
+  // auto-clears when focus clears (Exit Focus / Neural / Dive In all
+  // call setFocused(null), the effect below wipes isolated in sync).
+  const [isolated, setIsolated] = useState(null);
+  const lastClickRef = useRef({ t: 0, sig: null });
+  const DBL_MS = 340;
+
+  useEffect(() => {
+    if (!focused) setIsolated(null);
+  }, [focused]);
+
+  const nodeSignature = (n) => {
+    if (!n) return null;
+    if (n.kind === "big")       return `big/${n.name}`;
+    if (n.kind === "mid")       return `mid/${n.parent}/${n.name}`;
+    if (n.kind === "small")     return `small/${n.grandparent}/${n.parent}/${n.name}`;
+    if (n.kind === "attribute") return `attr/${n.categoryId}/${n.name}`;
+    return null;
+  };
+
+  // Wrap setFocused with double-click detection. Single click → normal
+  // focus. Second click on the SAME node within DBL_MS → toggle
+  // isolation on top of the focus. Because we always also run the
+  // focus setter, camera continuity isn't broken by the 2nd click
+  // (it's a re-focus on the same node, essentially a no-op for the
+  // camera's destination but harmless).
+  const handleSelect = (node) => {
+    const sig = nodeSignature(node);
+    const now = performance.now();
+    const last = lastClickRef.current;
+    if (sig && last.sig === sig && now - last.t < DBL_MS) {
+      setIsolated(iso => iso ? null : node);
+      lastClickRef.current = { t: 0, sig: null };
+    } else {
+      lastClickRef.current = { t: now, sig };
+    }
+    setFocused(node);
+  };
+
+  const selectBig   = b => handleSelect({ kind: "big",       name: b.name, pos: b.pos });
+  const selectMid   = s => handleSelect({ kind: "mid",       name: s.name, parent: s.parent, pos: s.pos });
+  const selectSmall = m => handleSelect({ kind: "small",     name: m.name, parent: m.parent, grandparent: m.grandparent, pos: m.pos });
+  const selectAttr  = a => handleSelect({ kind: "attribute", name: a.name, label: a.label, categoryId: a.categoryId, pos: a.pos });
 
   // Random teleport — flat uniform pick across what's on screen. If the
   // rendered pool is empty (e.g. every layer toggled off and nothing
@@ -5398,7 +5531,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
     setNodeSizes({ big: 1.0, mid: 1.0, small: 1.0, attr: 1.0 });
     setLabelOpts({ big: "on", mid: "auto", small: "auto", attr: "auto" });
     setLineOpacity(0.5);
-    setAllLinesOpacity(0.08);
+    setAllLinesOpacity(0.06);
     setRotateSpeed(0.18);
     setBgStars({ on: true, count: 2000, speed: 0.2 });
   };
@@ -5517,50 +5650,50 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
         <pointLight position={[80, 40, 40]} intensity={0.875} distance={200} color="#ffd6a8" />
 
         <Suspense fallback={null}>
-          {bgStars.on && bgStars.count > 0 && (
+          {bgStars.on && bgStars.count > 0 && !isolated && (
             <Stars radius={300} depth={90} count={bgStars.count} factor={6} saturation={0.15} fade speed={bgStars.speed} />
           )}
 
-          {renderedBigs.length > 0 && (
-            <BigNodes bigs={renderedBigs} focused={focused} layout={layout} onSelect={selectBig} onHover={setHovered} onCopy={copyNodeName}
+          {soloBigs.length > 0 && (
+            <BigNodes bigs={soloBigs} focused={focused} layout={layout} onSelect={selectBig} onHover={setHovered} onCopy={copyNodeName}
                       sizeMult={nodeSizes.big} />
           )}
 
-          {renderedMids.length > 0 && (
-            <MidNodes mids={renderedMids} focused={focused} layout={layout} onSelect={selectMid} onHover={setHovered} onCopy={copyNodeName}
+          {soloMids.length > 0 && (
+            <MidNodes mids={soloMids} focused={focused} layout={layout} onSelect={selectMid} onHover={setHovered} onCopy={copyNodeName}
                       sizeMult={nodeSizes.mid} relatedMidSet={relatedMidSet} />
           )}
 
-          {renderedSmalls.length > 0 && (
-            <SmallNodes smalls={renderedSmalls} focused={focused} layout={layout} onSelect={selectSmall} onHover={setHovered} onCopy={copyNodeName}
+          {soloSmalls.length > 0 && (
+            <SmallNodes smalls={soloSmalls} focused={focused} layout={layout} onSelect={selectSmall} onHover={setHovered} onCopy={copyNodeName}
                         sizeMult={nodeSizes.small} livePosRef={livePosRef} />
           )}
 
-          {renderedAttributes.length > 0 && (
-            <AttributeNodes attributes={renderedAttributes} focused={focused} layout={layout} onSelect={selectAttr} onHover={setHovered} onCopy={copyNodeName}
+          {soloAttributes.length > 0 && (
+            <AttributeNodes attributes={soloAttributes} focused={focused} layout={layout} onSelect={selectAttr} onHover={setHovered} onCopy={copyNodeName}
                             sizeMult={nodeSizes.attr} relatedAttrSet={relatedAttrSet} />
           )}
 
           {/* Labels — one NodeLabels instance per tier. Renders independently
               of the meshes so a hidden layer still can't show ghost labels. */}
-          {renderedBigs.length > 0 && labelOpts.big !== "off" && (
-            <NodeLabels items={renderedBigs} mode={labelOpts.big} tier="big"
+          {soloBigs.length > 0 && labelOpts.big !== "off" && (
+            <NodeLabels items={soloBigs} mode={labelOpts.big} tier="big"
                         focused={focused} livePosRef={livePosRef} />
           )}
-          {renderedMids.length > 0 && labelOpts.mid !== "off" && (
-            <NodeLabels items={renderedMids} mode={labelOpts.mid} tier="mid"
+          {soloMids.length > 0 && labelOpts.mid !== "off" && (
+            <NodeLabels items={soloMids} mode={labelOpts.mid} tier="mid"
                         focused={focused} livePosRef={livePosRef} />
           )}
-          {renderedSmalls.length > 0 && labelOpts.small !== "off" && (
-            <NodeLabels items={renderedSmalls} mode={labelOpts.small} tier="small"
+          {soloSmalls.length > 0 && labelOpts.small !== "off" && (
+            <NodeLabels items={soloSmalls} mode={labelOpts.small} tier="small"
                         focused={focused} livePosRef={livePosRef} />
           )}
-          {renderedAttributes.length > 0 && labelOpts.attr !== "off" && (
-            <NodeLabels items={renderedAttributes} mode={labelOpts.attr} tier="attr"
+          {soloAttributes.length > 0 && labelOpts.attr !== "off" && (
+            <NodeLabels items={soloAttributes} mode={labelOpts.attr} tier="attr"
                         focused={focused} livePosRef={livePosRef} />
           )}
 
-          {linesMode === "on" && (
+          {linesMode === "on" && !isolated && (
             <InteractiveEdges
               edges={allEdges}
               opacity={allLinesOpacity}
@@ -5572,7 +5705,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
               livePosRef={livePosRef}
             />
           )}
-          {linesMode !== "off" && focused && (
+          {linesMode !== "off" && focused && !isolated && (
             <InteractiveEdges
               edges={lines}
               opacity={lineOpacity}
@@ -5625,7 +5758,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
         />
         <AutoSpinAroundY active={autoRotate && !interacting && !cameraAnimating && !focused} rotateSpeed={rotateSpeed} controlsRef={controlsRef} />
         <FpsDragView controlsRef={controlsRef} releaseFollow={releaseCameraFollow} syncAnimating={syncCameraAnimating} onInteractingChange={setInteracting} focusedRef={focusedRef} />
-        <CameraRig focusTarget={focused} cameraGoto={cameraGoto} controlsRef={controlsRef} animatingRef={cameraAnimatingRef} syncAnimating={syncCameraAnimating} followingRef={cameraFollowingRef} livePosRef={livePosRef} />
+        <CameraRig focusTarget={focused} cameraGoto={cameraGoto} controlsRef={controlsRef} animatingRef={cameraAnimatingRef} syncAnimating={syncCameraAnimating} followingRef={cameraFollowingRef} livePosRef={livePosRef} autoRotate={autoRotate} />
         <FreeFlightNav controlsRef={controlsRef} keysDownRef={keyboardMoveRef} syncAnimating={syncCameraAnimating} releaseFollow={releaseCameraFollow} />
       </Canvas>
 
