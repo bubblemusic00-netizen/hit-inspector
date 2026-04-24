@@ -2303,22 +2303,42 @@ function HoverTooltip({ hovered, focused = null, livePosRef = null }) {
 // zoom). Without this cancel, the lerp pulls camera + target back each
 // frame while the user's input is fighting to move them — producing
 // the "stuck, snaps back, works again after a few seconds" symptom.
-function CameraRig({ focusTarget, resetCount, controlsRef, animatingRef, syncAnimating }) {
+function CameraRig({ focusTarget, resetCount, controlsRef, animatingRef, syncAnimating, followingRef, livePosRef }) {
   const { camera } = useThree();
   const destPos = useRef(new THREE.Vector3(0, 15, 130));
   const destTgt = useRef(new THREE.Vector3());
+  // flyInComplete — true once the initial lerp has converged on the
+  // target position. After this point we switch from "lerp towards a
+  // goal" to "rig the camera to the moving target" (steady follow).
+  // This matters for smalls, which orbit their parent mid every frame
+  // — without follow, the camera arrives at the small's position and
+  // then watches it drift out of frame.
+  const flyInComplete = useRef(false);
+  // scratch vectors reused per frame (avoid per-tick allocations)
+  const liveTgt = useRef(new THREE.Vector3());
+  const delta   = useRef(new THREE.Vector3());
 
-  // Flip both the ref (for useFrame's per-tick check) and the React
-  // state (for OrbitControls' autoRotate prop) via the sync callback.
-  // If syncAnimating isn't wired up, fall back to the ref only so the
-  // component stays usable.
   const setAnimating = (v) => {
     if (animatingRef) animatingRef.current = v;
     if (syncAnimating) syncAnimating(v);
   };
 
+  // Read the current live position of the focus target. For smalls
+  // that orbit, this comes from livePosRef (written each frame by
+  // SmallNodes). For other kinds we fall back to the static layout
+  // position stored on the focus object itself.
+  const readLivePos = () => {
+    if (focusTarget?.kind === "small" && livePosRef?.current) {
+      const key = focusTarget.grandparent + "/" + focusTarget.parent + "/" + focusTarget.name;
+      const live = livePosRef.current.get(key);
+      if (live) { liveTgt.current.set(live[0], live[1], live[2]); return true; }
+    }
+    if (focusTarget?.pos) { liveTgt.current.set(focusTarget.pos[0], focusTarget.pos[1], focusTarget.pos[2]); return true; }
+    return false;
+  };
+
   useEffect(() => {
-    if (!focusTarget) { setAnimating(false); return; }
+    if (!focusTarget) { setAnimating(false); if (followingRef) followingRef.current = false; flyInComplete.current = false; return; }
     const p = focusTarget.pos;
     if (!p) return;
     const t = new THREE.Vector3(...p);
@@ -2327,26 +2347,56 @@ function CameraRig({ focusTarget, resetCount, controlsRef, animatingRef, syncAni
     const dir = t.length() > 0.01 ? t.clone().normalize() : new THREE.Vector3(0, 0, 1);
     destPos.current.copy(t.clone().add(dir.multiplyScalar(dist)));
     setAnimating(true);
+    if (followingRef) followingRef.current = true;
+    flyInComplete.current = false;
   }, [focusTarget]);
 
-  // Reset: fly back to the default viewing position.
   useEffect(() => {
     if (!resetCount) return;
     destPos.current.set(0, 15, 130);
     destTgt.current.set(0, 0, 0);
     setAnimating(true);
+    if (followingRef) followingRef.current = false; // reset ≠ follow anything
+    flyInComplete.current = false;
   }, [resetCount]);
 
   useFrame((_, dt) => {
-    if (!animatingRef?.current) return;
-    const k = Math.min(1, dt * 2.8);
-    camera.position.lerp(destPos.current, k);
-    if (controlsRef.current) {
-      controlsRef.current.target.lerp(destTgt.current, k);
-      controlsRef.current.update();
+    // Case 1: initial fly-in — lerp hard toward destPos / live target.
+    // This fires for both focus (follow mode on) and reset (follow off).
+    if (animatingRef?.current) {
+      const hasLive = readLivePos();
+      const k = Math.min(1, dt * 2.8);
+      camera.position.lerp(destPos.current, k);
+      if (controlsRef.current) {
+        const goal = hasLive && followingRef?.current ? liveTgt.current : destTgt.current;
+        controlsRef.current.target.lerp(goal, k);
+        controlsRef.current.update();
+      }
+      // Converged? Stop the lerp. If we're following, the steady-follow
+      // branch below takes over without a visible seam.
+      const tgtGoal = controlsRef.current?.target
+        ? (readLivePos() && followingRef?.current ? liveTgt.current : destTgt.current)
+        : destTgt.current;
+      if (camera.position.distanceTo(destPos.current) < 0.07 &&
+          (!controlsRef.current || controlsRef.current.target.distanceTo(tgtGoal) < 0.15)) {
+        setAnimating(false);
+        flyInComplete.current = true;
+      }
+      return;
     }
-    if (camera.position.distanceTo(destPos.current) < 0.07 && controlsRef.current?.target.distanceTo(destTgt.current) < 0.07) {
-      setAnimating(false);
+
+    // Case 2: steady follow — the initial lerp finished and the user
+    // hasn't taken manual control. Track the target's live position by
+    // shifting camera and OrbitControls target by the same delta each
+    // frame. This preserves whatever orbit angle / zoom the user set,
+    // while keeping the subject perfectly centered.
+    if (followingRef?.current && flyInComplete.current && controlsRef.current) {
+      if (!readLivePos()) return;
+      delta.current.copy(liveTgt.current).sub(controlsRef.current.target);
+      if (delta.current.lengthSq() < 1e-8) return;
+      controlsRef.current.target.copy(liveTgt.current);
+      camera.position.add(delta.current);
+      controlsRef.current.update();
     }
   });
   return null;
@@ -2378,7 +2428,7 @@ function CameraRig({ focusTarget, resetCount, controlsRef, animatingRef, syncAni
 //
 // Any keypress cancels a pending focus-lerp so keyboard always wins
 // over a fly-to-focus animation in progress.
-function FreeFlightNav({ controlsRef, keysDownRef, syncAnimating }) {
+function FreeFlightNav({ controlsRef, keysDownRef, syncAnimating, releaseFollow }) {
   const { camera } = useThree();
   const forward  = useMemo(() => new THREE.Vector3(), []);
   const rightV   = useMemo(() => new THREE.Vector3(), []);
@@ -2405,6 +2455,13 @@ function FreeFlightNav({ controlsRef, keysDownRef, syncAnimating }) {
       // including straight-down where cross(forward, up) degenerates.
       forward.setFromMatrixColumn(camera.matrixWorld, 2).negate();
       rightV.setFromMatrixColumn(camera.matrixWorld, 0);
+      // Flatten W/S/A/D onto the horizontal plane. Without this, tilting
+      // the camera down makes W dive through the floor — which is the
+      // "uncomfortable with WASD" feel the user reported when combining
+      // mouse-drag pitch with keyboard flight. Vertical is reserved for
+      // the dedicated X / Z keys, which remain world-up / world-down.
+      forward.y = 0; if (forward.lengthSq() > 1e-6) forward.normalize();
+      rightV.y  = 0; if (rightV.lengthSq()  > 1e-6) rightV.normalize();
 
       if (keys.has("w")) desired.add(forward);
       if (keys.has("s")) desired.sub(forward);
@@ -2424,6 +2481,10 @@ function FreeFlightNav({ controlsRef, keysDownRef, syncAnimating }) {
         desired.multiplyScalar(speed);
       }
       if (syncAnimating) syncAnimating(false);
+      // Break camera follow lock too — if the user is flying manually
+      // they no longer want the camera glued to the focused star. Focus
+      // state itself stays, so a later click on the star re-engages.
+      if (releaseFollow) releaseFollow();
     }
 
     // Smooth-lerp velocity toward desired. When hasInput = false,
@@ -3451,6 +3512,45 @@ function AutoRotateButton({ on, onToggle }) {
   );
 }
 
+// Random teleport — takes you to a random rendered node. Uniform over
+// every node currently on screen, so the destination respects layer
+// toggles and filters. Helpful for serendipitous exploration when you
+// don't know what to look for next.
+function RandomButton({ onRandom, disabled }) {
+  return (
+    <div
+      onClick={disabled ? undefined : onRandom}
+      title={disabled ? "No nodes to visit" : "Fly to a random star"}
+      style={{
+        background: "rgba(10,10,15,0.92)", border: `1px solid ${T.borderHi}`,
+        borderRadius: T.r_md, padding: "10px 18px",
+        cursor: disabled ? "default" : "pointer",
+        opacity: disabled ? 0.4 : 1,
+        color: T.textSec, fontSize: 13, fontFamily: T.fontMono, fontWeight: 500,
+        letterSpacing: ".18em", textTransform: "uppercase", userSelect: "none",
+        display: "flex", alignItems: "center", gap: 10,
+        transition: "color 120ms, border-color 120ms, transform 120ms",
+        boxShadow: "0 4px 16px rgba(0,0,0,0.4)",
+      }}
+      onMouseEnter={e => {
+        if (disabled) return;
+        e.currentTarget.style.color = T.text;
+        e.currentTarget.style.borderColor = T.accent;
+        e.currentTarget.style.transform = "scale(1.04)";
+      }}
+      onMouseLeave={e => {
+        if (disabled) return;
+        e.currentTarget.style.color = T.textSec;
+        e.currentTarget.style.borderColor = T.borderHi;
+        e.currentTarget.style.transform = "scale(1)";
+      }}
+    >
+      <span style={{ fontSize: 15, lineHeight: 1 }}>⚂</span>
+      <span>random</span>
+    </div>
+  );
+}
+
 // Prominent "exit focus" pill — shown in the toolbar only while a node is
 // focused. Different from "reset view": this only unfocuses (camera stays
 // where the user left it), while Reset View also resets camera + filters.
@@ -3491,13 +3591,14 @@ function ExitFocusButton({ onExit }) {
 // EXIT FOCUS pill gets prime (leftmost) placement — that's the primary
 // action users want while exploring a node. Auto-rotate and Reset View
 // remain always-visible to the right.
-function MapToolbar({ autoRotate, onToggleAutoRotate, onReset, hasFocus, onExitFocus }) {
+function MapToolbar({ autoRotate, onToggleAutoRotate, onReset, hasFocus, onExitFocus, onRandom, canRandom }) {
   return (
     <div style={{
       position: "absolute", bottom: 20, left: "50%", transform: "translateX(-50%)",
       display: "flex", gap: 12, alignItems: "center", zIndex: 10,
     }}>
       {hasFocus && <ExitFocusButton onExit={onExitFocus} />}
+      <RandomButton onRandom={onRandom} disabled={!canRandom} />
       <AutoRotateButton on={autoRotate} onToggle={onToggleAutoRotate} />
       <ResetViewButton onReset={onReset} hasFocus={hasFocus} />
     </div>
@@ -3605,6 +3706,15 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
     cameraAnimatingRef.current = v;
     setCameraAnimating(v);
   };
+  // cameraFollowingRef — tracks whether the camera is actively locked
+  // onto the current focus target (including the steady-follow phase
+  // that runs AFTER the fly-in lerp completes). Set to true when a
+  // focus is picked, cleared the moment the user grabs control via
+  // drag / wheel / WASD / ZX. Letting the user break the lock without
+  // dropping the focus state means they can fly off to explore and
+  // then click the same star again to re-engage the follow.
+  const cameraFollowingRef = useRef(false);
+  const releaseCameraFollow = () => { cameraFollowingRef.current = false; };
 
   // Keyboard-flight key tracker: a Set of canonical lowercase keys
   // currently held down. We key on `e.code` (physical key position,
@@ -4176,6 +4286,41 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
   const selectSmall = m => setFocused({ kind: "small",     name: m.name, parent: m.parent, grandparent: m.grandparent, pos: m.pos });
   const selectAttr  = a => setFocused({ kind: "attribute", name: a.name, label: a.label, categoryId: a.categoryId, pos: a.pos });
 
+  // Random teleport — flat uniform pick across every rendered node. Using
+  // the rendered arrays (not the raw layout) means layer toggles, filters,
+  // and focus overrides all naturally restrict the pool to what the user
+  // actually sees right now. A few retries avoid landing on the star
+  // you're already focused on; if every retry still hits it (pool size 1)
+  // we re-fire setFocused with a fresh object to re-engage the follow.
+  const handleRandomize = () => {
+    const pool = [];
+    for (const b of renderedBigs)        pool.push({ kind: "big",       node: b });
+    for (const m of renderedMids)        pool.push({ kind: "mid",       node: m });
+    for (const s of renderedSmalls)      pool.push({ kind: "small",     node: s });
+    for (const a of renderedAttributes)  pool.push({ kind: "attribute", node: a });
+    if (pool.length === 0) return;
+    const isSameAsFocused = (item) => {
+      if (!focused) return false;
+      if (item.kind !== focused.kind || item.node.name !== focused.name) return false;
+      if (focused.kind === "mid")       return item.node.parent === focused.parent;
+      if (focused.kind === "small")     return item.node.parent === focused.parent && item.node.grandparent === focused.grandparent;
+      if (focused.kind === "attribute") return item.node.categoryId === focused.categoryId;
+      return true;
+    };
+    let pick = pool[Math.floor(Math.random() * pool.length)];
+    for (let i = 0; i < 5 && isSameAsFocused(pick); i++) {
+      pick = pool[Math.floor(Math.random() * pool.length)];
+    }
+    if (pick.kind === "big")            selectBig(pick.node);
+    else if (pick.kind === "mid")       selectMid(pick.node);
+    else if (pick.kind === "small")     selectSmall(pick.node);
+    else if (pick.kind === "attribute") selectAttr(pick.node);
+  };
+
+  const canRandomize =
+    renderedBigs.length + renderedMids.length +
+    renderedSmalls.length + renderedAttributes.length > 0;
+
   // Edge click — go to the OTHER endpoint if we're focused on one side,
   // otherwise (general view) pick one at random. Keeps navigation fluid.
   const clickEdge = (edge) => {
@@ -4415,15 +4560,21 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
 
         <OrbitControls
           ref={controlsRef}
-          enableDamping dampingFactor={0.07}
+          enableDamping dampingFactor={0.15}
           minDistance={2} maxDistance={260}
-          rotateSpeed={0.55} zoomSpeed={0.9} panSpeed={0.6}
+          // Pull polar limits a hair inside the exact poles. At exactly
+          // 0 or π the camera is colinear with world-up and azimuth
+          // becomes ambiguous (gimbal lock) — drag then flails. The
+          // ~0.5° offset is invisible to the eye and preserves the full
+          // top-to-bottom sweep.
+          minPolarAngle={0.01} maxPolarAngle={Math.PI - 0.01}
+          rotateSpeed={0.95} zoomSpeed={0.95} panSpeed={0.6}
           autoRotate={autoRotate && !interacting && !cameraAnimating} autoRotateSpeed={rotateSpeed}
-          onStart={() => { syncCameraAnimating(false); }}
+          onStart={() => { syncCameraAnimating(false); releaseCameraFollow(); }}
           mouseButtons={{ LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: null }}
         />
-        <CameraRig focusTarget={focused} resetCount={resetCount} controlsRef={controlsRef} animatingRef={cameraAnimatingRef} syncAnimating={syncCameraAnimating} />
-        <FreeFlightNav controlsRef={controlsRef} keysDownRef={keyboardMoveRef} syncAnimating={syncCameraAnimating} />
+        <CameraRig focusTarget={focused} resetCount={resetCount} controlsRef={controlsRef} animatingRef={cameraAnimatingRef} syncAnimating={syncCameraAnimating} followingRef={cameraFollowingRef} livePosRef={livePosRef} />
+        <FreeFlightNav controlsRef={controlsRef} keysDownRef={keyboardMoveRef} syncAnimating={syncCameraAnimating} releaseFollow={releaseCameraFollow} />
       </Canvas>
 
       <LayerPanel
@@ -4447,6 +4598,8 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
         onReset={handleReset}
         hasFocus={!!focused}
         onExitFocus={() => setFocused(null)}
+        onRandom={handleRandomize}
+        canRandom={canRandomize}
       />
       <FocusHUD focused={focused} layout={layout} />
       <FlightKeysHUD pressedKeys={pressedKeys} />
