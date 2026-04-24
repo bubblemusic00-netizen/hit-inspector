@@ -2616,7 +2616,7 @@ const FocusHologram = React.memo(function FocusHologram({ focused, layout, liveP
         sprite
         center
         distanceFactor={8}
-        position={[0, 6, 0]}
+        position={[0, 5, 0]}
         zIndexRange={[200, 120]}
         pointerEvents="none"
         style={{ pointerEvents: "none" }}
@@ -2895,10 +2895,10 @@ function CameraRig({ focusTarget, cameraGoto, controlsRef, animatingRef, syncAni
     camera.up.set(0, 1, 0);
     const t = new THREE.Vector3(...p);
     destTgt.current.copy(t);
-    // Focus distance per kind. Per-kind tuning after user feedback:
-    // big was too far (pulled 50% closer), mid stays good, small/attr
-    // were too close (pulled back).
-    const dist = focusTarget.kind === "big" ? 25 : focusTarget.kind === "mid" ? 20 : focusTarget.kind === "small" ? 18 : 22;
+    // Focus distance per kind. Per-kind tuning after user feedback
+    // rounds: big 50→25 (was too far), mid 20→22 (slight pullback),
+    // small 18→22 (more pullback, beyond what mid got), attr 22.
+    const dist = focusTarget.kind === "big" ? 25 : focusTarget.kind === "mid" ? 22 : focusTarget.kind === "small" ? 22 : 22;
     // Approach direction: prefer the side of the target the camera
     // is already on (continuity — no jarring teleport around the
     // galaxy). Fall back to radial-outward when the camera is
