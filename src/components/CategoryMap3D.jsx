@@ -2317,7 +2317,7 @@ function LiveLabel({ item, tier, focused, livePosRef }) {
   const dim = focused && !isF;
   return (
     <group ref={groupRef}>
-      <Html center distanceFactor={cfg.distanceFactor} style={{ pointerEvents: "none" }}>
+      <Html center distanceFactor={cfg.distanceFactor} zIndexRange={[5, 0]} style={{ pointerEvents: "none" }}>
         <div style={{
           color: "#fff",
           fontSize: isF ? cfg.fontSize + 2 : cfg.fontSize,
@@ -2768,7 +2768,7 @@ function HoverTooltip({ hovered, focused = null, livePosRef = null }) {
   }
   return (
     <group ref={groupRef}>
-      <Html center distanceFactor={20} style={{ pointerEvents: "none" }}>
+      <Html center distanceFactor={20} zIndexRange={[5, 0]} style={{ pointerEvents: "none" }}>
         <div style={{
           color: "#fff", fontSize: 11, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
           fontWeight: 600, background: "rgba(94,106,210,0.96)",
@@ -4911,9 +4911,15 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
       // user also turned genres to NONE.
       if (filters.mids && !filters.mids.has(m.name) && !overrideHit) return false;
       // Parent-tier gate applies ONLY when the user has NOT made an
-      // explicit mid pick. Otherwise mid-tier filter carries full weight.
+      // explicit mid pick AND the parent tier has an active non-empty
+      // selection. An empty bigs set (user clicked "none" on genres)
+      // is treated as "no constraint" here — otherwise toggling the
+      // parent off collapses every child tier too, which was the exact
+      // "children disappear when I click none on parent" the user
+      // pushed back on.
       if (!filters.mids) {
-        if (filters.bigs && !filters.bigs.has(m.parent) && !overrideHit) return false;
+        if (filters.bigs && filters.bigs.size > 0 &&
+            !filters.bigs.has(m.parent) && !overrideHit) return false;
       }
       return true;
     };
@@ -4926,10 +4932,15 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
       const overrideHit = focusOverride?.smalls.has(sk);
       // Own-tier filter wins: explicit small pick bypasses parent gates.
       if (filters.smalls && !filters.smalls.has(sk) && !overrideHit) return false;
-      // Parent gates only apply when no explicit small pick is set.
+      // Parent gates only apply when (a) no explicit small pick, and
+      // (b) the parent tier has a non-empty selection. Empty parent
+      // sets are "no constraint" — otherwise "none" on mids/bigs
+      // would black out smalls too, breaking independence.
       if (!filters.smalls) {
-        if (filters.mids && !filters.mids.has(s.parent) && !overrideHit) return false;
-        if (filters.bigs && !filters.bigs.has(s.grandparent) && !overrideHit) return false;
+        if (filters.mids && filters.mids.size > 0 &&
+            !filters.mids.has(s.parent) && !overrideHit) return false;
+        if (filters.bigs && filters.bigs.size > 0 &&
+            !filters.bigs.has(s.grandparent) && !overrideHit) return false;
       }
       return true;
     };
@@ -4990,31 +5001,27 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
   // renderedX so behavior resumes cleanly on isolation exit.
   const soloBigs = useMemo(() => {
     if (!isolated) return renderedBigs;
-    if (isolated.kind !== "big") return [];
-    return renderedBigs.filter(b => b.name === isolated.name);
-  }, [isolated, renderedBigs]);
+    if (!focusOverride) return [];
+    return renderedBigs.filter(b => focusOverride.bigs.has(b.name));
+  }, [isolated, focusOverride, renderedBigs]);
 
   const soloMids = useMemo(() => {
     if (!isolated) return renderedMids;
-    if (isolated.kind !== "mid") return [];
-    return renderedMids.filter(m => m.name === isolated.name && m.parent === isolated.parent);
-  }, [isolated, renderedMids]);
+    if (!focusOverride) return [];
+    return renderedMids.filter(m => focusOverride.mids.has(`${m.parent}/${m.name}`));
+  }, [isolated, focusOverride, renderedMids]);
 
   const soloSmalls = useMemo(() => {
     if (!isolated) return renderedSmalls;
-    if (isolated.kind !== "small") return [];
-    return renderedSmalls.filter(s =>
-      s.name === isolated.name && s.parent === isolated.parent && s.grandparent === isolated.grandparent
-    );
-  }, [isolated, renderedSmalls]);
+    if (!focusOverride) return [];
+    return renderedSmalls.filter(s => focusOverride.smalls.has(smallKey(s)));
+  }, [isolated, focusOverride, renderedSmalls]);
 
   const soloAttributes = useMemo(() => {
     if (!isolated) return renderedAttributes;
-    if (isolated.kind !== "attribute") return [];
-    return renderedAttributes.filter(a =>
-      a.categoryId === isolated.categoryId && a.name === isolated.name
-    );
-  }, [isolated, renderedAttributes]);
+    if (!focusOverride) return [];
+    return renderedAttributes.filter(a => focusOverride.attrs.has(attrKey(a)));
+  }, [isolated, focusOverride, renderedAttributes]);
 
   // ── Edge-scoped visibility (filter+layer, NOT focus) ─────────────
   // CRITICAL for smooth focus transitions. Previously allEdges used
@@ -5825,7 +5832,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
               livePosRef={livePosRef}
             />
           )}
-          {linesMode !== "off" && focused && !isolated && (
+          {linesMode !== "off" && focused && (
             <InteractiveEdges
               edges={lines}
               opacity={lineOpacity}
