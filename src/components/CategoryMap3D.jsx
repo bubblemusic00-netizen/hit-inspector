@@ -4488,6 +4488,10 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
     attributes: layout.hasAttrs,
   });
   const [focused, setFocused] = useState(null);
+  // Isolation (solo view) — must be declared BEFORE the soloX memos
+  // below; temporal dead zone otherwise. Toggled by double-click in
+  // handleSelect. When non-null, hides everything but this one node.
+  const [isolated, setIsolated] = useState(null);
   // focusedRef mirrors the focused state so FpsDragView can read the
   // current focus inside pointer handlers without rebuilding its
   // listeners on every focus change. Updated in a layout effect so the
@@ -5367,7 +5371,8 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
   // per-node timestamp so only same-node repeats count. Isolation
   // auto-clears when focus clears (Exit Focus / Neural / Dive In all
   // call setFocused(null), the effect below wipes isolated in sync).
-  const [isolated, setIsolated] = useState(null);
+  // State itself is declared earlier in the component body to avoid
+  // a temporal dead zone with the soloX memos above.
   const lastClickRef = useRef({ t: 0, sig: null });
   const DBL_MS = 340;
 
