@@ -2593,7 +2593,7 @@ const FocusHologram = React.memo(function FocusHologram({ focused, layout, liveP
   const MATRIX = "#39ff41";
 
   return (
-    <group ref={groupRef}>
+    <group ref={groupRef} position={focused.pos}>
       {/* Html with transform + sprite: renders as a billboarded 3D
           plane offset from the star. distanceFactor scales the DOM
           with camera distance, so focus distance ≈ normal reading
@@ -2601,12 +2601,22 @@ const FocusHologram = React.memo(function FocusHologram({ focused, layout, liveP
           screen corner, camera movement (WASD fly-past, orbit to the
           back side, Neural zoom-out) naturally moves or hides the
           hologram — the "object floating near the star" feel the
-          user asked for. */}
+          user asked for.
+
+          Positioning: `center` prop tells drei to translate(-50%,-50%)
+          the DOM content onto the anchor, so the div's center lands
+          at `position`. `position={[0, 4, 0]}` puts that anchor 4
+          world units above the star — floats the hologram above the
+          body. Earlier attempt used CSS translate on the inner div,
+          but that composed multiplicatively with drei's outer
+          matrix3d wrapper and ended up offsetting the whole thing
+          to the top-left of the viewport. */}
       <Html
         transform
         sprite
+        center
         distanceFactor={8}
-        position={[0, 0, 0]}
+        position={[0, 4, 0]}
         zIndexRange={[200, 120]}
         pointerEvents="none"
         style={{ pointerEvents: "none" }}
@@ -2615,11 +2625,6 @@ const FocusHologram = React.memo(function FocusHologram({ focused, layout, liveP
           width: 480,
           maxHeight: 240,
           overflow: "hidden",
-          // Center horizontally on the star anchor, float above it.
-          // translate(-50%) centers on X; calc(-100% - 20px) pulls
-          // the whole div up by its own height + 20px gap so the
-          // bottom edge clears the star's glow.
-          transform: "translate(-50%, calc(-100% - 20px))",
           color: MATRIX,
           fontFamily: "ui-monospace, 'Geist Mono', 'SF Mono', Menlo, monospace",
           userSelect: "none",
@@ -2890,7 +2895,12 @@ function CameraRig({ focusTarget, cameraGoto, controlsRef, animatingRef, syncAni
     camera.up.set(0, 1, 0);
     const t = new THREE.Vector3(...p);
     destTgt.current.copy(t);
-    const dist = focusTarget.kind === "big" ? 44 : focusTarget.kind === "mid" ? 18 : focusTarget.kind === "small" ? 9 : 16;
+    // Focus distance per kind, normalized so every kind lands at the
+    // same apparent star size on screen (radius/distance ≈ 0.0295 for
+    // all). Without this, e.g. a big would fill ~48 px radius while a
+    // small filled only ~36 px at the previous 2× distances, reading
+    // to the user as "zoom is more on some, less on others".
+    const dist = focusTarget.kind === "big" ? 44 : focusTarget.kind === "mid" ? 16 : focusTarget.kind === "small" ? 7 : 11;
     // Approach direction: prefer the side of the target the camera
     // is already on (continuity — no jarring teleport around the
     // galaxy). Fall back to radial-outward when the camera is
@@ -3231,17 +3241,29 @@ function FpsDragView({ controlsRef, releaseFollow, syncAnimating, onInteractingC
         if (r < 0.01) return;  // degenerate — can't orbit a zero radius
         orbitSpherical.setFromVector3(orbitOffset);
         orbitSpherical.theta -= dx * SENS;
-        // Elevation clamped well off the poles (±81° max). Past that
-        // the camera would stare straight down through the star from
-        // above or up through it from below — the exact "bad angle"
-        // the user said they don't want.
-        const ORBIT_PHI_LIMIT = 0.16;
+        // Full vertical freedom. Only a 0.005 rad epsilon keeps phi
+        // off the exact pole — spherical coords are singular there
+        // (theta becomes indeterminate). Everywhere else, pitch is
+        // unclamped. Previous 0.16 rad (9°) clamp was stopping the
+        // user from looking straight up or down; the derived camera.up
+        // below means lookAt stays well-defined near the poles.
+        const POLE_EPS = 0.005;
         orbitSpherical.phi = Math.max(
-          ORBIT_PHI_LIMIT,
-          Math.min(Math.PI - ORBIT_PHI_LIMIT, orbitSpherical.phi - dy * SENS),
+          POLE_EPS,
+          Math.min(Math.PI - POLE_EPS, orbitSpherical.phi - dy * SENS),
         );
         orbitOffset.setFromSpherical(orbitSpherical);
         camera.position.copy(controls.target).add(orbitOffset);
+        // Derived up: lookAt needs up not parallel to forward. Standard
+        // (0,1,0) degenerates when the camera is nearly above or below
+        // the target. This formula gives world-Y at the equator and
+        // smoothly transitions to the polar-circle tangent at the
+        // poles, so the orientation is stable all the way through.
+        camera.up.set(
+          -Math.cos(orbitSpherical.phi) * Math.sin(orbitSpherical.theta),
+           Math.sin(orbitSpherical.phi),
+          -Math.cos(orbitSpherical.phi) * Math.cos(orbitSpherical.theta),
+        );
         camera.lookAt(controls.target);
         // Keep Euler in sync so a subsequent unfocused FPS drag (user
         // clicks Exit Focus mid-session) doesn't jump on first move.
@@ -3840,31 +3862,33 @@ function LayerPanel({
   const midItems = useMemo(() => {
     const bigColorByName = {};
     for (const b of layout.bigs) bigColorByName[b.name] = b.color;
-    let src = layout.mids;
-    if (filters.bigs) src = src.filter(m => filters.bigs.has(m.parent));
-    return src
+    // All mids always listed — no cascade from filters.bigs. Filter
+    // lists are independent picks; the viz side (visibleMids) gives
+    // an explicit mid-tier selection precedence over a turned-off big,
+    // so the user can legitimately pick a mid under a hidden parent.
+    return layout.mids
       .map(m => ({
         value: m.name, label: m.name, group: m.parent,
         color: bigColorByName[m.parent] || "#5E6AD2",
       }))
       .sort((a, b) => a.label.localeCompare(b.label));
-  }, [layout.mids, layout.bigs, filters.bigs]);
+  }, [layout.mids, layout.bigs]);
 
   const [bigQuery, setBigQuery] = useState("");
   const [midQuery, setMidQuery] = useState("");
   const [smallQuery, setSmallQuery] = useState("");
   const [attrQuery, setAttrQuery] = useState("");
 
-  // Microstyle items — scoped by selected bigs/mids so the list shrinks
-  // as the user narrows above. Colored by grandparent (big) color.
+  // Microstyle items — all smalls always listed in the filter UI.
+  // Cascades from filters.bigs / filters.mids removed for the same
+  // reason as midItems: viz-side precedence (explicit smalls wins
+  // over parent filters) makes the cross-parent pick valid, so the
+  // UI must keep the option visible.
   const smallItems = useMemo(() => {
     if (!layout.hasSmalls) return [];
     const bigColorByName = {};
     for (const b of layout.bigs) bigColorByName[b.name] = b.color;
-    let src = layout.smalls;
-    if (filters.bigs) src = src.filter(s => filters.bigs.has(s.grandparent));
-    if (filters.mids) src = src.filter(s => filters.mids.has(s.parent));
-    return src
+    return layout.smalls
       .map(s => ({
         value: smallKey(s),
         label: s.name,
@@ -3872,7 +3896,7 @@ function LayerPanel({
         color: bigColorByName[s.grandparent] || "#5E6AD2",
       }))
       .sort((a, b) => a.label.localeCompare(b.label));
-  }, [layout.smalls, layout.bigs, layout.hasSmalls, filters.bigs, filters.mids]);
+  }, [layout.smalls, layout.bigs, layout.hasSmalls]);
 
   // Attribute items — flattened across all categories. `group` holds the
   // category label so MultiSelectList shows it as a breadcrumb, and color
@@ -3895,19 +3919,12 @@ function LayerPanel({
       });
   }, [layout.attributes, layout.hasAttrs]);
 
-  const setBigsFilter = (next) => {
-    setFilters(f => {
-      if (next && f.mids) {
-        const allowedMidNames = new Set(
-          layout.mids.filter(m => next.has(m.parent)).map(m => m.name)
-        );
-        const prunedMids = new Set();
-        for (const v of f.mids) if (allowedMidNames.has(v)) prunedMids.add(v);
-        return { ...f, bigs: next, mids: prunedMids.size === 0 ? null : prunedMids };
-      }
-      return { ...f, bigs: next };
-    });
-  };
+  // All four filter setters stay purely own-tier. Previously setBigsFilter
+  // pruned filters.mids to remove any mid whose parent was no longer in
+  // the new bigs set — but the user's explicit mid picks should survive
+  // toggling bigs independently (matches the independence of the filter
+  // lists themselves).
+  const setBigsFilter   = (next) => setFilters(f => ({ ...f, bigs: next }));
   const setMidsFilter   = (next) => setFilters(f => ({ ...f, mids: next }));
   const setSmallsFilter = (next) => setFilters(f => ({ ...f, smalls: next }));
   const setAttrsFilter  = (next) => setFilters(f => ({ ...f, attrs: next }));
@@ -4306,6 +4323,43 @@ function CenterButton({ onCenter }) {
   );
 }
 
+// Recenter the camera on the CURRENT focus target. Useful when the
+// user has orbited away and wants to return to the "standard" focus
+// framing without losing the focused node. Triggers a full fly-in
+// by re-firing setFocused with a new object reference (CameraRig's
+// effect depends on `focused` identity — same content + new ref
+// restarts the lerp). Shown only while focused.
+function RecenterButton({ onRecenter }) {
+  return (
+    <div
+      onClick={onRecenter}
+      title="Re-fly to the focused star"
+      style={{
+        background: "rgba(10,10,15,0.92)", border: `1px solid ${T.borderHi}`,
+        borderRadius: T.r_md, padding: "10px 18px", cursor: "pointer",
+        color: T.textSec, fontSize: 13, fontFamily: T.fontMono, fontWeight: 500,
+        letterSpacing: ".18em", textTransform: "uppercase", userSelect: "none",
+        display: "flex", alignItems: "center", gap: 10,
+        transition: "color 120ms, border-color 120ms, transform 120ms",
+        boxShadow: "0 4px 16px rgba(0,0,0,0.4)",
+      }}
+      onMouseEnter={e => {
+        e.currentTarget.style.color = T.text;
+        e.currentTarget.style.borderColor = T.accent;
+        e.currentTarget.style.transform = "scale(1.04)";
+      }}
+      onMouseLeave={e => {
+        e.currentTarget.style.color = T.textSec;
+        e.currentTarget.style.borderColor = T.borderHi;
+        e.currentTarget.style.transform = "scale(1)";
+      }}
+    >
+      <span style={{ fontSize: 15, lineHeight: 1 }}>◎</span>
+      <span>recenter</span>
+    </div>
+  );
+}
+
 // NEURAL — the new default view. Wide overview from outside the
 // galaxy with all connection edges on, filters cleared, focus
 // dropped, search cleared. Differs from CENTER in that it also
@@ -4453,13 +4507,14 @@ function ExitFocusButton({ onExit }) {
 // EXIT FOCUS pill gets prime (leftmost) placement — that's the primary
 // action users want while exploring a node. Auto-rotate and Reset View
 // remain always-visible to the right.
-function MapToolbar({ autoRotate, onToggleAutoRotate, onCenter, onNeural, hasFocus, onExitFocus, onRandom, canRandom }) {
+function MapToolbar({ autoRotate, onToggleAutoRotate, onCenter, onNeural, hasFocus, onExitFocus, onRecenter, onRandom, canRandom }) {
   return (
     <div style={{
       position: "absolute", bottom: 20, left: "50%", transform: "translateX(-50%)",
       display: "flex", gap: 12, alignItems: "center", zIndex: 10,
     }}>
       {hasFocus && <ExitFocusButton onExit={onExitFocus} />}
+      {hasFocus && <RecenterButton onRecenter={onRecenter} />}
       <CenterButton onCenter={onCenter} />
       <RandomButton onRandom={onRandom} disabled={!canRandom} />
       <AutoRotateButton on={autoRotate} onToggle={onToggleAutoRotate} />
@@ -5845,6 +5900,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
         onNeural={handleNeural}
         hasFocus={!!focused}
         onExitFocus={() => setFocused(null)}
+        onRecenter={() => focused && setFocused({ ...focused })}
         onRandom={handleRandomize}
         canRandom={canRandomize}
       />
