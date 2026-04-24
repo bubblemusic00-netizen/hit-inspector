@@ -2409,7 +2409,7 @@ function HoverTooltip({ hovered, focused = null, livePosRef = null }) {
 // the "stuck, snaps back, works again after a few seconds" symptom.
 function CameraRig({ focusTarget, cameraGoto, controlsRef, animatingRef, syncAnimating, followingRef, livePosRef }) {
   const { camera } = useThree();
-  const destPos = useRef(new THREE.Vector3(0, 15, 130));
+  const destPos = useRef(new THREE.Vector3(0, 30, 230));
   const destTgt = useRef(new THREE.Vector3());
   // flyInComplete — true once the initial lerp has converged on the
   // target position. After this point we switch from "lerp towards a
@@ -2607,37 +2607,94 @@ function FreeFlightNav({ controlsRef, keysDownRef, syncAnimating, releaseFollow 
   return null;
 }
 
-// AutoSpinInPlace — replaces OrbitControls.autoRotate. The built-in
-// autoRotate orbits the camera around controls.target, which looks like
-// "circling an empty point" when target is (0,0,0) and the user isn't
-// specifically gazing at the origin. This component instead rotates
-// the target around the camera's own position, which yaws the view on
-// the spot — the natural "I stand still and look around" motion.
+// FpsDragView — replaces OrbitControls' left-button ROTATE with a
+// first-person "look around" interaction: drag rotates the camera's
+// ORIENTATION; the camera position itself stays planted. Stars stream
+// past your view as you turn.
 //
-// Pauses while user is interacting (drag / wheel), while a fly-in lerp
-// is running, and while steady-follow is glued to a moving focus
-// target (both would fight this rotation). Matches the disable logic
-// of the previous OrbitControls.autoRotate prop.
-function AutoSpinInPlace({ active, speed, controlsRef, animatingRef, followingRef, interacting }) {
-  const { camera } = useThree();
-  useFrame((_, dt) => {
-    if (!active || interacting) return;
-    if (animatingRef?.current) return;
-    if (followingRef?.current) return;
-    const controls = controlsRef.current;
-    if (!controls) return;
-    // Match OrbitControls' autoRotateSpeed units: rad/sec = 2π/60 * speed.
-    // speed ≈ 0.18 (default slider value) → ~0.019 rad/sec → 5 min / rev.
-    const angle = dt * (Math.PI * 2 / 60) * speed;
-    if (Math.abs(angle) < 1e-6) return;
-    const dx = controls.target.x - camera.position.x;
-    const dz = controls.target.z - camera.position.z;
-    const cosA = Math.cos(angle);
-    const sinA = Math.sin(angle);
-    controls.target.x = camera.position.x + dx * cosA - dz * sinA;
-    controls.target.z = camera.position.z + dx * sinA + dz * cosA;
-    controls.update();
-  });
+// Rotation is accumulated directly on camera.quaternion via a YXZ
+// Euler (yaw around world-up, then pitch around local-right, no
+// roll). YXZ has no singularity surface to clamp against — .y wraps
+// infinitely for horizontal drag, .x accumulates past ±π/2 so the
+// camera rolls over through the top/bottom instead of getting stuck.
+// The old spherical-coord approach clamped phi to [0.02, π-0.02]
+// which is exactly the "stuck at a certain point" the user hit on
+// vertical drag.
+//
+// After each move we re-anchor controls.target to a point directly
+// in front of the camera at the same distance it was before, so
+// OrbitControls' wheel-dolly and autoRotate still feel consistent.
+function FpsDragView({ controlsRef, releaseFollow, syncAnimating, onInteractingChange }) {
+  const { camera, gl } = useThree();
+  const draggingRef = useRef(null);
+  const eulerRef    = useRef(new THREE.Euler(0, 0, 0, "YXZ"));
+
+  useEffect(() => {
+    const el = gl.domElement;
+    if (!el) return;
+
+    const forward = new THREE.Vector3();
+
+    const onDown = (e) => {
+      // Left button only — middle (wheel dolly) and right (nothing)
+      // pass through to OrbitControls untouched.
+      if (e.button !== 0 && e.pointerType !== "touch") return;
+      // Seed euler from the camera's current orientation so the drag
+      // continues smoothly from wherever they were looking, no jump.
+      eulerRef.current.setFromQuaternion(camera.quaternion, "YXZ");
+      draggingRef.current = { sx: e.clientX, sy: e.clientY };
+      try { el.setPointerCapture(e.pointerId); } catch {}
+      if (releaseFollow) releaseFollow();
+      if (syncAnimating) syncAnimating(false);
+      if (onInteractingChange) onInteractingChange(true);
+    };
+
+    const onMove = (e) => {
+      if (!draggingRef.current) return;
+      const dx = e.clientX - draggingRef.current.sx;
+      const dy = e.clientY - draggingRef.current.sy;
+      draggingRef.current.sx = e.clientX;
+      draggingRef.current.sy = e.clientY;
+
+      const controls = controlsRef.current;
+      if (!controls) return;
+
+      const SENS = 0.004;   // radians per pixel — close to 1:1 feel
+
+      // Accumulate yaw on .y (around world-up) and pitch on .x.
+      // No clamp — user can look any direction, including all the
+      // way over and around.
+      eulerRef.current.y -= dx * SENS;
+      eulerRef.current.x -= dy * SENS;
+      camera.quaternion.setFromEuler(eulerRef.current);
+      camera.updateMatrixWorld();
+
+      // Re-anchor target to the point directly in front of the
+      // camera at its previous distance. Keeps wheel-dolly speed
+      // consistent and gives autoRotate a sensible pivot.
+      camera.getWorldDirection(forward);
+      const dist = controls.target.distanceTo(camera.position) || 10;
+      controls.target.copy(camera.position).addScaledVector(forward, dist);
+    };
+
+    const onUp = (e) => {
+      if (!draggingRef.current) return;
+      draggingRef.current = null;
+      try { el.releasePointerCapture(e.pointerId); } catch {}
+    };
+
+    el.addEventListener("pointerdown",   onDown);
+    el.addEventListener("pointermove",   onMove);
+    el.addEventListener("pointerup",     onUp);
+    el.addEventListener("pointercancel", onUp);
+    return () => {
+      el.removeEventListener("pointerdown",   onDown);
+      el.removeEventListener("pointermove",   onMove);
+      el.removeEventListener("pointerup",     onUp);
+      el.removeEventListener("pointercancel", onUp);
+    };
+  }, [gl, camera, controlsRef, releaseFollow, syncAnimating, onInteractingChange]);
+
   return null;
 }
 
@@ -3592,9 +3649,9 @@ function FocusHUD({ focused, layout }) {
 }
 
 // CENTER — snaps the camera to the origin (0,0,0) so the user stands
-// at the exact middle of the galaxy. With AutoSpinInPlace on, stars
-// orbit around them. Not a mode, just a snap — scrolling out moves
-// the camera off-origin naturally via OrbitControls zoom.
+// at the exact middle of the galaxy. From there autoRotate (when on)
+// orbits the camera around target, which visually reads as the whole
+// system spinning around you on its axis — the "bamakom" spin.
 function CenterButton({ onCenter }) {
   return (
     <div
@@ -3851,7 +3908,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
   // happen to match a previous target. Replaces the older resetCount
   // pattern so we can have multiple named destinations (center, neural,
   // whatever comes next) without adding per-destination refs.
-  const [cameraGoto, setCameraGoto] = useState({ pos: [0, 15, 130], tgt: [0, 0, 0], n: 0 });
+  const [cameraGoto, setCameraGoto] = useState({ pos: [0, 30, 230], tgt: [0, 0, 0], n: 0 });
 
   // Filtering panel — multi-select membership sets. `null` = all shown
   // (no filter). Explicit `Set` = only those values pass the filter. An
@@ -4331,8 +4388,8 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
     // connections. A small per-big cap adds genre-level connections
     // for attrs that associate aggregated at that level.
     if (layout.hasAttrs && renderedAttributes.length) {
-      const ATTR_EDGE_CAP_MID = 8;   // edges per attr to its referencing mids
-      const BIG_ATTR_CAP      = 3;   // additional edges per big's top attrs
+      const ATTR_EDGE_CAP_MID = 15;  // was 8 — user wants denser pairing
+      const BIG_ATTR_CAP      = 6;   // was 3 — same reason
       const emittedEdgeKey = new Set();
 
       if (layout.attrToMids) {
@@ -4426,11 +4483,11 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
           if (!entry || typeof entry !== "object") continue;
           let added = 0;
           for (const [field, values] of Object.entries(entry)) {
-            if (added >= 3) break;
+            if (added >= 6) break;
             const tgt = COMP_FIELD_TO_CAT[field];
             if (!tgt || !Array.isArray(values)) continue;
             for (const val of values) {
-              if (added >= 3) break;
+              if (added >= 6) break;
               const otherKey = `${tgt}:${val}`;
               const other = renderedAttrByKey.get(otherKey);
               if (!other?.pos) continue;
@@ -4475,6 +4532,72 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
         }
       }
     }
+
+    // ─ mid ↔ mid PAIRING edges ─────────────────────────────────────
+    // Until here every edge has been either tree (big→mid, mid→small)
+    // or attr-anchored (attr→mid, big→attr, attr↔attr). None of those
+    // directly say "these two mids are similar because they pair with
+    // the same things". For each mid we compute the overlap of its
+    // complement-attr set against every other mid's set, then draw
+    // edges to its top MID_PAIR_CAP overlaps. Two shared attrs is the
+    // minimum to qualify — less than that is noise.
+    //
+    // O(N²) in renderedMids, but N maxes out around 1k and the inner
+    // loop is a single Set.has call per attr, so the whole pass runs
+    // in a few ms on any realistic view. Guarded by hasAttrs because
+    // without complement data there's nothing to compare.
+    if (layout.hasAttrs && layout.midToAttrs && renderedMids.length > 1) {
+      const MID_PAIR_CAP = 5;
+      const MIN_OVERLAP  = 2;
+      const midAttrSets = new Map();
+      for (const m of renderedMids) {
+        const attrs = layout.midToAttrs(m) || [];
+        const ks = new Set(attrs.map(({ node }) => `${node.categoryId}:${node.name}`));
+        if (ks.size > 0) midAttrSets.set(m, ks);
+      }
+      const pairsByMid = new Map();
+      for (const m of midAttrSets.keys()) pairsByMid.set(m, []);
+
+      const midList = [...midAttrSets.keys()];
+      for (let i = 0; i < midList.length; i++) {
+        const a = midList[i];
+        const aSet = midAttrSets.get(a);
+        for (let j = i + 1; j < midList.length; j++) {
+          const b = midList[j];
+          const bSet = midAttrSets.get(b);
+          let shared = 0;
+          // Iterate the smaller set for speed.
+          const [src, dst] = aSet.size <= bSet.size ? [aSet, bSet] : [bSet, aSet];
+          for (const k of src) if (dst.has(k)) shared++;
+          if (shared >= MIN_OVERLAP) {
+            pairsByMid.get(a).push({ other: b, score: shared });
+            pairsByMid.get(b).push({ other: a, score: shared });
+          }
+        }
+      }
+
+      const emittedMidPair = new Set();
+      for (const [m, pairs] of pairsByMid) {
+        pairs.sort((x, y) => y.score - x.score);
+        let drawn = 0;
+        for (const p of pairs) {
+          if (drawn >= MID_PAIR_CAP) break;
+          const k1 = `${m.parent}/${m.name}`;
+          const k2 = `${p.other.parent}/${p.other.name}`;
+          const ek = k1 < k2 ? `mm/${k1}::${k2}` : `mm/${k2}::${k1}`;
+          if (emittedMidPair.has(ek)) continue;
+          emittedMidPair.add(ek);
+          out.push({
+            from: m.pos, to: p.other.pos,
+            color: blendHex(m.color, p.other.color),
+            fromNode: { ...m, kind: "mid" },
+            toNode:   { ...p.other, kind: "mid" },
+          });
+          drawn++;
+        }
+      }
+    }
+
     return out;
   }, [renderedBigs, renderedMids, renderedSmalls, renderedAttributes, layout]);
 
@@ -4558,7 +4681,27 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
     setFilters({ bigs: null, mids: null, smalls: null, attrCats: null, attrs: null });
     setSearch("");
     setLinesMode("on");
-    setCameraGoto(prev => ({ pos: [0, 15, 130], tgt: [0, 0, 0], n: prev.n + 1 }));
+    // Compute the furthest-from-origin rendered node and pull back far
+    // enough that it fits within ~40% of the vertical viewport at the
+    // default 50° FOV. Floor at 200 so tiny layouts (e.g. moods with
+    // only 5 bigs) still feel like a panorama shot, not a close-up.
+    // This replaces the old hardcoded (0,15,130) which sat inside the
+    // galaxy for medium/large layouts — user couldn't see the edges.
+    let maxSq = 0;
+    const scan = (arr) => {
+      if (!arr) return;
+      for (const n of arr) {
+        if (!n?.pos) continue;
+        const r = n.pos[0] * n.pos[0] + n.pos[1] * n.pos[1] + n.pos[2] * n.pos[2];
+        if (r > maxSq) maxSq = r;
+      }
+    };
+    scan(layout.bigs);
+    scan(layout.mids);
+    scan(layout.attributes);
+    const maxR = Math.sqrt(maxSq);
+    const dist = Math.max(200, maxR * 2.6);
+    setCameraGoto(prev => ({ pos: [0, dist * 0.13, dist], tgt: [0, 0, 0], n: prev.n + 1 }));
     // Pause auto-rotate briefly so the goto lerp doesn't tug-of-war with
     // the spin. Without this, the fly-in visibly drifts sideways.
     setInteracting(true);
@@ -4691,7 +4834,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
       onContextMenu={(e) => e.preventDefault()}
     >
       <Canvas
-        camera={{ position: [0, 15, 130], fov: 50, near: 0.1, far: 800 }}
+        camera={{ position: [0, 30, 230], fov: 50, near: 0.1, far: 800 }}
         dpr={[1, 2]}
         onPointerDown={onCanvasPointerDown}
         onPointerUp={onCanvasPointerUp}
@@ -4785,17 +4928,29 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
           ref={controlsRef}
           enableDamping dampingFactor={0.15}
           minDistance={0.3} maxDistance={800}
-          // Pull polar limits a hair inside the exact poles. At exactly
-          // 0 or π the camera is colinear with world-up and azimuth
-          // becomes ambiguous (gimbal lock) — drag then flails. The
-          // ~0.5° offset is invisible to the eye and preserves the full
-          // top-to-bottom sweep.
-          minPolarAngle={0.01} maxPolarAngle={Math.PI - 0.01}
+          // Polar limits opened to the full hemisphere. FPS drag now
+          // rotates the camera's own quaternion (YXZ Euler) rather
+          // than moving the target through spherical space, so the
+          // old 0.01 gimbal guard on THIS clamp was fighting vertical
+          // drag — when offset polar crept near 0 or π, OrbitControls
+          // snapped the camera sideways, reading to the user as "stuck
+          // at a certain point going up/down". Three.js' own 1e-5 EPS
+          // still handles exact-pole degeneracy.
+          minPolarAngle={0} maxPolarAngle={Math.PI}
           rotateSpeed={0.95} zoomSpeed={0.95} panSpeed={0.6}
+          // Native autoRotate — orbits the camera around target, which
+          // from the user's POV looks like the galaxy itself spinning
+          // on its axis while they stand still. This is the intended
+          // "360 bamakom for the whole system" feel.
+          autoRotate={autoRotate && !interacting && !cameraAnimating}
+          autoRotateSpeed={rotateSpeed * 2}
           onStart={() => { syncCameraAnimating(false); releaseCameraFollow(); }}
-          mouseButtons={{ LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: null }}
+          // Left button is OWNED by FpsDragView (yaw-in-place / FPS
+          // look-around). OrbitControls only handles middle-button
+          // dolly and wheel zoom now.
+          mouseButtons={{ LEFT: null, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: null }}
         />
-        <AutoSpinInPlace active={autoRotate} speed={rotateSpeed} controlsRef={controlsRef} animatingRef={cameraAnimatingRef} followingRef={cameraFollowingRef} interacting={interacting} />
+        <FpsDragView controlsRef={controlsRef} releaseFollow={releaseCameraFollow} syncAnimating={syncCameraAnimating} onInteractingChange={setInteracting} />
         <CameraRig focusTarget={focused} cameraGoto={cameraGoto} controlsRef={controlsRef} animatingRef={cameraAnimatingRef} syncAnimating={syncCameraAnimating} followingRef={cameraFollowingRef} livePosRef={livePosRef} />
         <FreeFlightNav controlsRef={controlsRef} keysDownRef={keyboardMoveRef} syncAnimating={syncCameraAnimating} releaseFollow={releaseCameraFollow} />
       </Canvas>
