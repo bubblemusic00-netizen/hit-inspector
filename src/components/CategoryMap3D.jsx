@@ -2662,10 +2662,20 @@ function FpsDragView({ controlsRef, releaseFollow, syncAnimating, onInteractingC
       const SENS = 0.004;   // radians per pixel — close to 1:1 feel
 
       // Accumulate yaw on .y (around world-up) and pitch on .x.
-      // No clamp — user can look any direction, including all the
-      // way over and around.
+      // Yaw wraps freely; pitch is clamped just shy of ±90° to keep
+      // the camera out of the gimbal zone. Past ±90° the YXZ Euler
+      // flips the camera upside-down AND OrbitControls.update()'s
+      // built-in camera.lookAt(target) starts fighting our quaternion
+      // every frame (its cross(up, z) goes degenerate), which reads
+      // as the galaxy tumbling/spazzing. 88.8° is functionally
+      // unlimited — you can look nearly straight up/down — without
+      // ever entering that degenerate zone.
+      const PITCH_LIMIT = Math.PI / 2 - 0.02;
       eulerRef.current.y -= dx * SENS;
-      eulerRef.current.x -= dy * SENS;
+      eulerRef.current.x = Math.max(
+        -PITCH_LIMIT,
+        Math.min(PITCH_LIMIT, eulerRef.current.x - dy * SENS),
+      );
       camera.quaternion.setFromEuler(eulerRef.current);
       camera.updateMatrixWorld();
 
@@ -2694,6 +2704,61 @@ function FpsDragView({ controlsRef, releaseFollow, syncAnimating, onInteractingC
       el.removeEventListener("pointercancel", onUp);
     };
   }, [gl, camera, controlsRef, releaseFollow, syncAnimating, onInteractingChange]);
+
+  return null;
+}
+
+// AutoSpinAroundY — custom auto-rotate that keeps the spin FLAT (a
+// turntable around world-Y through world origin) no matter where the
+// user has dragged. OrbitControls' native autoRotate orbits the
+// camera around `controls.target`, so after an FPS drag shifts target
+// off-origin the orbit becomes an off-center circle — from the
+// viewer's perspective the galaxy appears to wobble / spiral instead
+// of rotating on its own axis.
+//
+// We rotate three things by the same yaw each frame:
+//   • camera.position around world-Y through origin
+//   • controls.target around world-Y through origin (so camera-to-
+//     target relationship is preserved — no snap to a new focus)
+//   • camera.quaternion around world-Y by the same angle (so the
+//     camera keeps looking at the spot it was looking at before)
+// Result: stars drift past in a pure horizontal arc. No spiral, same
+// "galaxy on a record player" feel the user asked for.
+//
+// Compatible with OrbitControls: OrbitControls.update() each frame
+// re-derives spherical from (position − target) and writes position
+// back. Since position and target moved by the same yaw, the derived
+// spherical is the same as before — round-trip identity, no fight.
+function AutoSpinAroundY({ active, rotateSpeed, controlsRef }) {
+  const { camera } = useThree();
+  const tmpQuat = useRef(new THREE.Quaternion());
+  const axis    = useRef(new THREE.Vector3(0, 1, 0));
+
+  useFrame((_, dt) => {
+    if (!active) return;
+    const controls = controlsRef.current;
+    if (!controls) return;
+
+    // Match the old OrbitControls autoRotate rate at rotateSpeed=0.08
+    // (full rotation ~10 min). Internally: 2π × speed × 2 / 60.
+    const rate  = rotateSpeed * Math.PI / 15;
+    const angle = rate * dt;
+    if (angle === 0) return;
+    const c = Math.cos(angle);
+    const s = Math.sin(angle);
+
+    const px = camera.position.x, pz = camera.position.z;
+    camera.position.x = px * c + pz * s;
+    camera.position.z = -px * s + pz * c;
+
+    const tx = controls.target.x, tz = controls.target.z;
+    controls.target.x = tx * c + tz * s;
+    controls.target.z = -tx * s + tz * c;
+
+    tmpQuat.current.setFromAxisAngle(axis.current, angle);
+    camera.quaternion.premultiply(tmpQuat.current);
+    camera.updateMatrixWorld();
+  });
 
   return null;
 }
@@ -4533,7 +4598,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
       }
     }
 
-    // ─ mid ↔ mid PAIRING edges ─────────────────────────────────────
+    // ─ mid ↔ mid + small ↔ small PAIRING edges ───────────────────
     // Until here every edge has been either tree (big→mid, mid→small)
     // or attr-anchored (attr→mid, big→attr, attr↔attr). None of those
     // directly say "these two mids are similar because they pair with
@@ -4542,13 +4607,21 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
     // edges to its top MID_PAIR_CAP overlaps. Two shared attrs is the
     // minimum to qualify — less than that is noise.
     //
+    // Smalls (microstyles, articulations) have no native complement
+    // table — they inherit their parent mid's pairing profile. Once
+    // we've decided mid A pairs well with mid B, we also connect a
+    // couple of A's smalls to B's smalls so the microstyle tier gets
+    // pairing lines too, not just the lone parent→micro tree edge.
+    //
     // O(N²) in renderedMids, but N maxes out around 1k and the inner
     // loop is a single Set.has call per attr, so the whole pass runs
     // in a few ms on any realistic view. Guarded by hasAttrs because
     // without complement data there's nothing to compare.
     if (layout.hasAttrs && layout.midToAttrs && renderedMids.length > 1) {
-      const MID_PAIR_CAP = 5;
-      const MIN_OVERLAP  = 2;
+      const MID_PAIR_CAP    = 5;
+      const MIN_OVERLAP     = 2;
+      const SMALL_PAIR_CAP  = 2;   // pairs of similar-mids that seed small edges
+      const SMALLS_PER_PAIR = 2;   // smalls picked from each side of a pair
       const midAttrSets = new Map();
       for (const m of renderedMids) {
         const attrs = layout.midToAttrs(m) || [];
@@ -4576,9 +4649,12 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
         }
       }
 
+      // Sort each mid's pair list descending once — both the
+      // mid↔mid emit pass and the small↔small pass rely on it.
+      for (const pairs of pairsByMid.values()) pairs.sort((x, y) => y.score - x.score);
+
       const emittedMidPair = new Set();
       for (const [m, pairs] of pairsByMid) {
-        pairs.sort((x, y) => y.score - x.score);
         let drawn = 0;
         for (const p of pairs) {
           if (drawn >= MID_PAIR_CAP) break;
@@ -4594,6 +4670,80 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
             toNode:   { ...p.other, kind: "mid" },
           });
           drawn++;
+        }
+      }
+
+      // small ↔ small — piggyback on the mid pairs we just computed.
+      // For each mid's top pairs, grab its smalls and the partner
+      // mid's smalls, connect a couple. Skips mids whose smalls aren't
+      // rendered (layer toggled off) or whose partner has no smalls.
+      if (layout.hasSmalls && renderedSmalls.length > 1) {
+        const smallsByMidKey = new Map();
+        for (const s of renderedSmalls) {
+          const key = `${s.grandparent}/${s.parent}`;
+          if (!smallsByMidKey.has(key)) smallsByMidKey.set(key, []);
+          smallsByMidKey.get(key).push(s);
+        }
+        const emittedSmallPair = new Set();
+        for (const [m, pairs] of pairsByMid) {
+          const mKey    = `${m.parent}/${m.name}`;
+          const mSmalls = smallsByMidKey.get(mKey);
+          if (!mSmalls || !mSmalls.length) continue;
+          let pairsUsed = 0;
+          for (const p of pairs) {
+            if (pairsUsed >= SMALL_PAIR_CAP) break;
+            const oKey    = `${p.other.parent}/${p.other.name}`;
+            const oSmalls = smallsByMidKey.get(oKey);
+            if (!oSmalls || !oSmalls.length) continue;
+            const pick = Math.min(SMALLS_PER_PAIR, mSmalls.length, oSmalls.length);
+            for (let i = 0; i < pick; i++) {
+              const sa = mSmalls[i];
+              const sb = oSmalls[i];
+              const k1 = smallKey(sa);
+              const k2 = smallKey(sb);
+              const ek = k1 < k2 ? `ss/${k1}::${k2}` : `ss/${k2}::${k1}`;
+              if (emittedSmallPair.has(ek)) continue;
+              emittedSmallPair.add(ek);
+              out.push({
+                from: sa.pos, to: sb.pos,
+                color: blendHex(sa.color, sb.color),
+                fromNode: { ...sa, kind: "small" },
+                toNode:   { ...sb, kind: "small" },
+              });
+            }
+            pairsUsed++;
+          }
+        }
+
+        // small → attr — connect each rendered small to its top-N
+        // of its parent mid's attrs. Gives microstyles their own
+        // direct lines into the attribute cloud instead of only
+        // reaching it through their parent mid. Cap is tight (3)
+        // because every small under the same mid would otherwise
+        // emit the same fan.
+        const SMALL_ATTR_CAP = 3;
+        const renderedAttrByKey2 = new Map(renderedAttributes.map(a => [`${a.categoryId}:${a.name}`, a]));
+        for (const s of renderedSmalls) {
+          if (!s.pos) continue;
+          const parentMid = layout.midsByKey?.[s.parent + "/" + s.grandparent]
+                       ||  layout.midsByKey?.[s.parent]
+                       ||  layout.mids.find(x => x.name === s.parent && (!s.grandparent || x.parent === s.grandparent));
+          if (!parentMid) continue;
+          const attrs = layout.midToAttrs(parentMid) || [];
+          let drawn = 0;
+          for (const { node } of attrs) {
+            if (drawn >= SMALL_ATTR_CAP) break;
+            const aKey = `${node.categoryId}:${node.name}`;
+            const a = renderedAttrByKey2.get(aKey);
+            if (!a?.pos) continue;
+            out.push({
+              from: s.pos, to: a.pos,
+              color: blendHex(s.color, a.color),
+              fromNode: { ...s, kind: "small" },
+              toNode:   { ...a, kind: "attribute" },
+            });
+            drawn++;
+          }
         }
       }
     }
@@ -4938,18 +5088,19 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
           // still handles exact-pole degeneracy.
           minPolarAngle={0} maxPolarAngle={Math.PI}
           rotateSpeed={0.95} zoomSpeed={0.95} panSpeed={0.6}
-          // Native autoRotate — orbits the camera around target, which
-          // from the user's POV looks like the galaxy itself spinning
-          // on its axis while they stand still. This is the intended
-          // "360 bamakom for the whole system" feel.
-          autoRotate={autoRotate && !interacting && !cameraAnimating}
-          autoRotateSpeed={rotateSpeed * 2}
+          // autoRotate is OWNED by AutoSpinAroundY below — the native
+          // one orbits camera around controls.target, which spirals
+          // whenever target isn't at origin (every time the user has
+          // FPS-dragged). Ours spins around world-Y through origin so
+          // the galaxy behaves like a turntable no matter what.
+          autoRotate={false}
           onStart={() => { syncCameraAnimating(false); releaseCameraFollow(); }}
           // Left button is OWNED by FpsDragView (yaw-in-place / FPS
           // look-around). OrbitControls only handles middle-button
           // dolly and wheel zoom now.
           mouseButtons={{ LEFT: null, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: null }}
         />
+        <AutoSpinAroundY active={autoRotate && !interacting && !cameraAnimating} rotateSpeed={rotateSpeed} controlsRef={controlsRef} />
         <FpsDragView controlsRef={controlsRef} releaseFollow={releaseCameraFollow} syncAnimating={syncCameraAnimating} onInteractingChange={setInteracting} />
         <CameraRig focusTarget={focused} cameraGoto={cameraGoto} controlsRef={controlsRef} animatingRef={cameraAnimatingRef} syncAnimating={syncCameraAnimating} followingRef={cameraFollowingRef} livePosRef={livePosRef} />
         <FreeFlightNav controlsRef={controlsRef} keysDownRef={keyboardMoveRef} syncAnimating={syncCameraAnimating} releaseFollow={releaseCameraFollow} />
