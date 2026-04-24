@@ -2352,67 +2352,92 @@ function CameraRig({ focusTarget, resetCount, controlsRef, animatingRef, syncAni
   return null;
 }
 
-// FreeFlightNav — WASD + Z/X keyboard free-flight that shifts both the
-// camera AND the OrbitControls target by the same vector. Because the
-// target moves in lockstep, orbit controls keep working naturally after
-// each move: the user can still drag to rotate around wherever they
-// flew to, scroll to zoom, etc. Without moving the target you'd orbit
-// around the old pivot, which feels broken.
+// FreeFlightNav — WASD + Z/X keyboard free-flight with game-grade feel.
 //
-// Movement is camera-relative for W/A/S/D (go where you're looking)
-// and world-axis for Z/X (always straight down/up), which matches
-// how users instinctively reach for an "elevate" control. Speed
-// scales with camera-to-target distance so flying near a small node
-// isn't unmanageably fast, and flying across the full map isn't
-// glacially slow.
+// Architecture:
+//   - Camera AND OrbitControls target move together by the same vector,
+//     so orbit / zoom / drag keep working naturally after each flight
+//     (without moving the target you'd orbit the old pivot — feels
+//     broken).
+//   - Input → desired-velocity vector, then smooth-lerp the actual
+//     velocity toward that every frame. Quick accel (feels responsive)
+//     and slightly softer decel (slides to a stop — no jerk).
+//   - Speed scales with camera-to-target distance so flight works at
+//     any zoom: precise nudge when zoomed into a microstyle, fast sweep
+//     when zoomed out across the whole map.
+//   - Shift doubles speed (boost) for crossing long stretches fast.
 //
-// Any keypress cancels a pending focus-lerp so keyboard input always
-// wins over a fly-to animation (same principle as OrbitControls
-// onStart). We ignore keys while the user is typing into an <input> /
-// <textarea> / contenteditable element so search / filter typing
-// doesn't drift the camera.
+// Key axes from camera.matrixWorld (column 0 = right, column 2 negated =
+// forward) instead of hand-computed cross products — robust at any
+// pitch, including looking straight up/down where the naive
+// forward × world-up approach degenerates.
+//
+// W/A/S/D are camera-relative (go where you're looking); Z/X are
+// world-axis (always straight down/up) because "elevate vertically"
+// is the intuitive read of those keys even when looking down.
+//
+// Any keypress cancels a pending focus-lerp so keyboard always wins
+// over a fly-to-focus animation in progress.
 function FreeFlightNav({ controlsRef, keysDownRef, syncAnimating }) {
   const { camera } = useThree();
-  const forward = useMemo(() => new THREE.Vector3(), []);
-  const right   = useMemo(() => new THREE.Vector3(), []);
-  const move    = useMemo(() => new THREE.Vector3(), []);
-  const WORLD_UP = useMemo(() => new THREE.Vector3(0, 1, 0), []);
+  const forward  = useMemo(() => new THREE.Vector3(), []);
+  const rightV   = useMemo(() => new THREE.Vector3(), []);
+  const desired  = useMemo(() => new THREE.Vector3(), []);
+  const velocity = useMemo(() => new THREE.Vector3(), []);
+  const deltaPos = useMemo(() => new THREE.Vector3(), []);
+
+  // Smoothing constants — tuned for "quick response, gentle stop".
+  // alpha per frame = 1 - exp(-SMOOTH * dt), so higher = snappier.
+  const ACCEL_SMOOTH = 22; // ~94% of target speed in ~130ms
+  const DECEL_SMOOTH = 15; // ~94% to zero in ~200ms — brief slide
 
   useFrame((_, dt) => {
     if (!controlsRef.current) return;
     const keys = keysDownRef.current;
-    if (!keys || keys.size === 0) return;
+    const hasInput = !!keys && (
+      keys.has("w") || keys.has("s") || keys.has("a") || keys.has("d") ||
+      keys.has("z") || keys.has("x")
+    );
 
-    // Cancel any fly-to-focus animation so the keyboard immediately
-    // takes precedence (otherwise lerp + movement fight each other).
-    if (syncAnimating) syncAnimating(false);
+    desired.set(0, 0, 0);
+    if (hasInput) {
+      // Camera-relative axes from matrixWorld — correct at every pitch
+      // including straight-down where cross(forward, up) degenerates.
+      forward.setFromMatrixColumn(camera.matrixWorld, 2).negate();
+      rightV.setFromMatrixColumn(camera.matrixWorld, 0);
 
-    // Speed scales with camera-to-target distance. At default zoom
-    // (dist ~130) that's ~19 u/s — crosses the map in a handful of
-    // seconds. Zoomed into a microstyle (dist ~5) it's ~0.75 u/s —
-    // nudge-precision.
-    const dist = camera.position.distanceTo(controlsRef.current.target);
-    const speed = Math.max(1.2, dist * 0.15);
-    const step = speed * dt;
+      if (keys.has("w")) desired.add(forward);
+      if (keys.has("s")) desired.sub(forward);
+      if (keys.has("d")) desired.add(rightV);
+      if (keys.has("a")) desired.sub(rightV);
+      if (keys.has("x")) desired.y += 1;
+      if (keys.has("z")) desired.y -= 1;
 
-    forward.subVectors(controlsRef.current.target, camera.position);
-    if (forward.lengthSq() < 1e-6) return;
-    forward.normalize();
-    right.crossVectors(forward, WORLD_UP).normalize();
+      if (desired.lengthSq() > 0) {
+        desired.normalize();
+        // Distance-scaled speed: 2 u/s minimum (precision near a node),
+        // grows with distance up to ~24 u/s at default zoom. Shift
+        // boosts by 2.5× for long-range traversal.
+        const dist = camera.position.distanceTo(controlsRef.current.target);
+        const boost = keys.has("shift") ? 2.5 : 1;
+        const speed = Math.max(2, dist * 0.18) * boost;
+        desired.multiplyScalar(speed);
+      }
+      if (syncAnimating) syncAnimating(false);
+    }
 
-    move.set(0, 0, 0);
-    if (keys.has("w")) move.add(forward);
-    if (keys.has("s")) move.sub(forward);
-    if (keys.has("d")) move.add(right);
-    if (keys.has("a")) move.sub(right);
-    if (keys.has("x")) move.y += 1;
-    if (keys.has("z")) move.y -= 1;
+    // Smooth-lerp velocity toward desired. When hasInput = false,
+    // desired is zero vector, so this also handles deceleration.
+    const smooth = hasInput ? ACCEL_SMOOTH : DECEL_SMOOTH;
+    const alpha = 1 - Math.exp(-smooth * dt);
+    velocity.lerp(desired, alpha);
 
-    if (move.lengthSq() === 0) return;
-    move.normalize().multiplyScalar(step);
-    camera.position.add(move);
-    controlsRef.current.target.add(move);
-    controlsRef.current.update();
+    if (velocity.lengthSq() > 1e-5) {
+      deltaPos.copy(velocity).multiplyScalar(dt);
+      camera.position.add(deltaPos);
+      controlsRef.current.target.add(deltaPos);
+      controlsRef.current.update();
+    }
   });
   return null;
 }
@@ -3274,13 +3299,12 @@ function LayerPanel({
 }
 
 function FlightKeysHUD({ pressedKeys }) {
-  // Compact keypad showing the 6 flight keys, with active ones lit in
+  // Compact keypad showing the 6 flight keys with active ones lit in
   // the accent color. Doubles as a keyboard-hit diagnostic: if nothing
-  // lights up when you press W, the listener isn't catching events
-  // (Layout handler eating them, focus in an input, etc). If a key
-  // lights up but the camera doesn't move, the issue is in the nav
-  // component instead.
-  const active = new Set(pressedKeys.split(""));
+  // lights up when you press W, the listener isn't catching events.
+  // If W lights up but the camera doesn't move, the issue is in the
+  // nav component. The SHIFT pill lights when boost is active.
+  const active = new Set(pressedKeys.split(","));
   const Key = ({ k, label }) => {
     const on = active.has(k);
     return (
@@ -3296,6 +3320,7 @@ function FlightKeysHUD({ pressedKeys }) {
       }}>{label || k.toUpperCase()}</div>
     );
   };
+  const shiftOn = active.has("shift");
   return (
     <div style={{
       position: "absolute", bottom: 60, left: "50%", transform: "translateX(-50%)",
@@ -3312,6 +3337,17 @@ function FlightKeysHUD({ pressedKeys }) {
       <div style={{ display: "flex", gap: 4 }}>
         <Key k="z" /><Key k="x" />
       </div>
+      <div style={{ width: 1, height: 22, background: "rgba(255,255,255,0.12)" }} />
+      <div style={{
+        fontFamily: T.fontMono, fontSize: 9, fontWeight: 700,
+        letterSpacing: ".06em",
+        padding: "5px 8px", borderRadius: 4,
+        color: shiftOn ? "#fff" : T.textMuted,
+        background: shiftOn ? T.accent : "rgba(255,255,255,0.05)",
+        border: `1px solid ${shiftOn ? T.accent : "rgba(255,255,255,0.14)"}`,
+        boxShadow: shiftOn ? "0 0 12px rgba(94,106,210,0.55)" : "none",
+        transition: "background 80ms, color 80ms, border-color 80ms, box-shadow 80ms",
+      }}>SHIFT · BOOST</div>
     </div>
   );
 }
@@ -3323,7 +3359,7 @@ function FocusHUD({ focused, layout }) {
       color: T.textMuted, fontFamily: T.fontMono,
       background: "rgba(10,10,15,0.65)", padding: "6px 10px",
       borderRadius: T.r_sm, userSelect: "none", zIndex: 10,
-    }}>drag · scroll · click a node to see its pairings · wasd / zx to fly</div>
+    }}>drag · scroll · click a node · wasd / zx to fly · shift to boost</div>
   );
 
   let kindLabel, crumbs;
@@ -3588,14 +3624,21 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
   const rootDivRef = useRef(null);
   const CODE_TO_KEY_MAP = useMemo(() => ({
     KeyW: "w", KeyA: "a", KeyS: "s", KeyD: "d", KeyX: "x", KeyZ: "z",
+    // Shift is a modifier, not a movement direction — it doubles
+    // speed in FreeFlightNav (boost). Left and right shift both
+    // map to the same internal "shift" token.
+    ShiftLeft: "shift", ShiftRight: "shift",
   }), []);
   const isTextTarget = (t) => {
     if (!t) return false;
     const tag = (t.tagName || "").toLowerCase();
     return tag === "input" || tag === "textarea" || t.isContentEditable;
   };
+  // Comma-separated join so the multi-char "shift" token doesn't bleed
+  // into single-char matches (without this, pressing Shift alone would
+  // light up S/H/I/F/T on the HUD).
   const syncPressedKeys = () => {
-    setPressedKeys([...keyboardMoveRef.current].sort().join(""));
+    setPressedKeys([...keyboardMoveRef.current].sort().join(","));
   };
   const flightKeyDown = (e) => {
     if (isTextTarget(e.target)) return;
@@ -3604,7 +3647,9 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
     const before = keyboardMoveRef.current.size;
     keyboardMoveRef.current.add(mapped);
     if (keyboardMoveRef.current.size !== before) syncPressedKeys();
-    e.preventDefault();
+    // Shift has other meanings in the UI (Shift+click, etc.) — don't
+    // preventDefault on it. The movement keys are safe to preventDefault.
+    if (mapped !== "shift") e.preventDefault();
   };
   const flightKeyUp = (e) => {
     const mapped = CODE_TO_KEY_MAP[e.code];
