@@ -24,9 +24,11 @@ export default function Layout({
     ? "Overview"
     : selected === "search"
       ? "Search"
-      : selected === "map3d"
-        ? "3D Map"
-        : (CATEGORIES.find(c => c.id === selected)?.label || "");
+      : selected === "graphs"
+        ? "Popularity Graphs"
+        : selected === "map3d"
+          ? "3D Map"
+          : (CATEGORIES.find(c => c.id === selected)?.label || "");
 
   // Lock body scroll when the drawer is open on mobile, so the main
   // content doesn't scroll behind the open drawer.
@@ -116,7 +118,6 @@ export default function Layout({
               { id: "items",  label: "Items" },
               { id: "family", label: "Family" },
               { id: "stats",  label: "Stats" },
-              { id: "map",    label: "3D Map" },
             ].map(t => (
               <button
                 key={t.id}
@@ -201,7 +202,6 @@ export default function Layout({
               { id: "items",  label: "Items" },
               { id: "family", label: "Family" },
               { id: "stats",  label: "Statistics" },
-              { id: "map",    label: "3D Map" },
             ].map(t => (
               <button
                 key={t.id}
@@ -258,6 +258,11 @@ function SidebarInner({ groups, selected, onSelect, sourcePath, sourceModified }
         label="3D Map"
         active={selected === "map3d"}
         onClick={() => onSelect("map3d")}
+      />
+      <NavItem
+        label="Popularity Graphs"
+        active={selected === "graphs"}
+        onClick={() => onSelect("graphs")}
       />
 
       {Object.keys(groups).map(groupName => (

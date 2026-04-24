@@ -5,6 +5,7 @@ import CategoryMap3D from "./components/CategoryMap3D.jsx";
 import CategoryPage from "./components/CategoryPage.jsx";
 import OverviewPage from "./components/OverviewPage.jsx";
 import SearchPage from "./components/SearchPage.jsx";
+import PopularityGraphs from "./components/PopularityGraphs.jsx";
 import { CATEGORIES, buildDerivedData } from "./categories.js";
 
 export default function App() {
@@ -68,6 +69,8 @@ export default function App() {
     mainContent = <OverviewPage raw={raw} derived={derived} />;
   } else if (selected === "search") {
     mainContent = <SearchPage data={raw.data} onResultClick={handleSearchResultClick} />;
+  } else if (selected === "graphs") {
+    mainContent = <PopularityGraphs data={raw.data} />;
   } else if (selected === "map3d") {
     mainContent = <CategoryMap3D categoryId="genres" data={raw.data} />;
     showTabs = false;
