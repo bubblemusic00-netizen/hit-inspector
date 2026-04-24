@@ -2179,17 +2179,31 @@ function InteractiveEdges({
   );
 }
 
-// Floating tag shown at the midpoint of a hovered edge.
-// - If the user has focused a node: show the OTHER endpoint's name
-//   (focus-relative — tells them where the click would take them)
-// - If no focus (general ON-mode view): show BOTH endpoint names with ↔
+// Floating tag that follows the mouse cursor while an edge is
+// hovered. Shows the OTHER endpoint's name (focus-relative) when a
+// node is focused, otherwise shows both endpoints joined by ↔.
+// Rendered as a fixed DOM overlay (outside the Canvas) so it's
+// always readable regardless of camera angle — previous version
+// anchored to the edge midpoint in 3D could end up behind the
+// focused star or off-screen, which is what the user described as
+// "random / invisible".
 function EdgeTooltip({ edge, focused }) {
+  const ref = useRef(null);
+
+  useEffect(() => {
+    if (!edge) return;
+    const onMove = (e) => {
+      const el = ref.current;
+      if (!el) return;
+      el.style.left = e.clientX + "px";
+      el.style.top  = (e.clientY - 14) + "px";
+    };
+    window.addEventListener("pointermove", onMove);
+    return () => window.removeEventListener("pointermove", onMove);
+  }, [edge]);
+
   if (!edge) return null;
-  const mid = [
-    (edge.from[0] + edge.to[0]) / 2,
-    (edge.from[1] + edge.to[1]) / 2,
-    (edge.from[2] + edge.to[2]) / 2,
-  ];
+
   let text;
   if (focused) {
     const sameAsFocused = (n) =>
@@ -2202,18 +2216,36 @@ function EdgeTooltip({ edge, focused }) {
     text = `${a}  ↔  ${b}`;
   }
   if (!text) return null;
+
   return (
-    <Html position={mid} center style={{ pointerEvents: "none" }} zIndexRange={[100, 0]}>
-      <div style={{
-        color: "#fff", fontSize: 11, fontFamily: T.fontMono,
-        fontWeight: 600, background: "rgba(14,14,22,0.96)",
+    <div
+      ref={ref}
+      style={{
+        position: "fixed",
+        // Initial off-screen so first render doesn't flash at (0,0)
+        // before the pointermove effect attaches its first position.
+        left: -9999,
+        top: -9999,
+        // Center horizontally on cursor, float above it.
+        transform: "translate(-50%, -100%)",
+        color: "#fff",
+        fontSize: 11,
+        fontFamily: T.fontMono,
+        fontWeight: 600,
+        background: "rgba(14,14,22,0.96)",
         border: "1px solid rgba(94,106,210,0.6)",
-        padding: "5px 10px", borderRadius: 4, whiteSpace: "nowrap",
-        transform: "translate(-50%, -50%)", position: "absolute",
-        userSelect: "none", boxShadow: "0 4px 14px rgba(0,0,0,0.6)",
+        padding: "5px 10px",
+        borderRadius: 4,
+        whiteSpace: "nowrap",
+        userSelect: "none",
+        pointerEvents: "none",
+        boxShadow: "0 4px 14px rgba(0,0,0,0.6)",
         letterSpacing: "0.02em",
-      }}>{text}</div>
-    </Html>
+        zIndex: 50,
+      }}
+    >
+      {text}
+    </div>
   );
 }
 
@@ -2574,23 +2606,24 @@ const FocusHologram = React.memo(function FocusHologram({ focused, layout, liveP
         transform
         sprite
         distanceFactor={8}
-        position={[3, 1.5, 0]}
+        position={[0, 0, 0]}
         zIndexRange={[200, 120]}
+        pointerEvents="none"
         style={{ pointerEvents: "none" }}
       >
         <div style={{
-          width: 440,
-          maxHeight: 300,
+          width: 480,
+          maxHeight: 240,
           overflow: "hidden",
+          // Center horizontally on the star anchor, float above it.
+          // translate(-50%) centers on X; calc(-100% - 20px) pulls
+          // the whole div up by its own height + 20px gap so the
+          // bottom edge clears the star's glow.
+          transform: "translate(-50%, calc(-100% - 20px))",
           color: MATRIX,
           fontFamily: "ui-monospace, 'Geist Mono', 'SF Mono', Menlo, monospace",
           userSelect: "none",
           pointerEvents: "none",
-          // Force LTR — when the browser/system defaults to RTL (user
-          // on Hebrew system), the content flow flips and long lines
-          // render right-to-left, which reads as "cut off on the left"
-          // to the user because the overflow gets clipped on what
-          // would normally be the starting edge.
           direction: "ltr",
           textAlign: "left",
         }}>
@@ -2857,7 +2890,7 @@ function CameraRig({ focusTarget, cameraGoto, controlsRef, animatingRef, syncAni
     camera.up.set(0, 1, 0);
     const t = new THREE.Vector3(...p);
     destTgt.current.copy(t);
-    const dist = focusTarget.kind === "big" ? 22 : focusTarget.kind === "mid" ? 9 : focusTarget.kind === "small" ? 4.5 : 8;
+    const dist = focusTarget.kind === "big" ? 44 : focusTarget.kind === "mid" ? 18 : focusTarget.kind === "small" ? 9 : 16;
     // Approach direction: prefer the side of the target the camera
     // is already on (continuity — no jarring teleport around the
     // galaxy). Fall back to radial-outward when the camera is
@@ -4537,6 +4570,32 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
 
   const controlsRef = useRef();
   const interactionTimer = useRef(null);
+
+  // Drag-state tracking so a click that happens at the end of a
+  // camera drag (orbit, FPS look-around, WASD travel) doesn't
+  // register as an "I want to click the thing under the cursor"
+  // intent. A click is only honored if the pointer didn't drift
+  // more than ~6px between pointerdown and pointerup.
+  const dragStateRef = useRef({ sx: 0, sy: 0, moved: false });
+  useEffect(() => {
+    const DRAG_THRESHOLD_SQ = 36;  // 6px × 6px
+    const onDown = (e) => {
+      dragStateRef.current = { sx: e.clientX, sy: e.clientY, moved: false };
+    };
+    const onMove = (e) => {
+      const d = dragStateRef.current;
+      if (d.moved) return;
+      const dx = e.clientX - d.sx;
+      const dy = e.clientY - d.sy;
+      if (dx * dx + dy * dy > DRAG_THRESHOLD_SQ) d.moved = true;
+    };
+    window.addEventListener("pointerdown", onDown);
+    window.addEventListener("pointermove", onMove);
+    return () => {
+      window.removeEventListener("pointerdown", onDown);
+      window.removeEventListener("pointermove", onMove);
+    };
+  }, []);
   // Paired with a React state — the ref is read in useFrame every tick
   // (zero re-render cost), the state is what OrbitControls' `autoRotate`
   // prop reads so React knows to pause the orbit when a lerp is active.
@@ -5463,7 +5522,12 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
 
   // Edge click — go to the OTHER endpoint if we're focused on one side,
   // otherwise (general view) pick one at random. Keeps navigation fluid.
+  // Drag-gated: if the pointer moved more than the drag threshold between
+  // down and up, treat this as an accidental pass-over during a camera
+  // drag and ignore. Prevents the "started dragging, brushed a line,
+  // got teleported" frustration the user reported.
   const clickEdge = (edge) => {
+    if (dragStateRef.current.moved) return;
     if (!edge?.fromNode || !edge?.toNode) return;
     let target;
     if (focused) {
@@ -5722,14 +5786,6 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
               livePosRef={livePosRef}
             />
           )}
-          <EdgeTooltip
-            edge={
-              hoveredEdgeIdx    >= 0 ? lines[hoveredEdgeIdx] :
-              hoveredAllEdgeIdx >= 0 ? allEdges[hoveredAllEdgeIdx] :
-              null
-            }
-            focused={focused}
-          />}
 
           <HoverTooltip hovered={hovered} focused={focused} livePosRef={livePosRef} />
           <FocusHologram focused={focused} layout={layout} livePosRef={livePosRef} />
@@ -5793,6 +5849,14 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
         canRandom={canRandomize}
       />
       <FocusHUD focused={focused} layout={layout} />
+      <EdgeTooltip
+        edge={
+          hoveredEdgeIdx    >= 0 ? lines[hoveredEdgeIdx] :
+          hoveredAllEdgeIdx >= 0 ? allEdges[hoveredAllEdgeIdx] :
+          null
+        }
+        focused={focused}
+      />
       {copyToast && (
         <div
           key={copyToast.t}
