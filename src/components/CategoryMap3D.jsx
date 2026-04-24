@@ -982,8 +982,15 @@ function buildGenreLayout(data) {
 }
 
 // ── Layout: Instruments ────────────────────────────────────────────
+// Uses the same attribute-cloud + complement-edge pattern as the moods
+// layout. The data bridge is SUGGESTION_MAP (instrument → suggested
+// mood/groove/vocalist/etc.), which maps one-to-one onto the fields
+// in COMP_FIELD_TO_CAT. Without this wiring the instruments view
+// only shows the family/instrument/articulation tree — no cross-
+// category edges to moods/grooves/etc. that should clearly be there.
 function buildInstrumentsLayout(data) {
   const tree = data.SPECIFIC_INSTRUMENTS || {};
+  const suggestion = data.SUGGESTION_MAP || {};
   const fNames = Object.keys(tree);
 
   const bigsNodes = fNames.map(f => ({
@@ -991,11 +998,81 @@ function buildInstrumentsLayout(data) {
     color: INSTRUMENT_COLORS[f] || DEFAULT_COLOR, mass: 4.0,
   }));
 
-  // No attribute data for instruments → just repel to spread evenly
-  runForceLayout(bigsNodes, [], 120);
+  // All 8 ATTR_CATS become attribute nodes (instruments is not in ATTR_CATS
+  // so there's nothing to exclude — every complement target is fair game).
+  const { nodes: attrNodes, byKey: attrByKey, idToIdx: attrLocalIdx } = buildAttributeCloud(data, []);
 
-  const bigs = bigsNodes;
+  const forceNodes = [...bigsNodes, ...attrNodes];
+  const idToIdx = {};
+  forceNodes.forEach((n, i) => { idToIdx[n.id] = i; });
+
+  const edges = [];
+
+  // Per-family aggregate: sum SUGGESTION_MAP entries across every
+  // instrument in a family to get "which attrs does this family pair
+  // with most often". Drives big→attr spring edges.
+  const bigAttrCount = {};
+  bigsNodes.forEach(b => { bigAttrCount[b.name] = {}; });
+  fNames.forEach(fName => {
+    Object.keys(tree[fName]).forEach(instName => {
+      const entry = suggestion[instName];
+      if (!entry || typeof entry !== "object") return;
+      Object.entries(entry).forEach(([field, values]) => {
+        const tgt = COMP_FIELD_TO_CAT[field];
+        if (!tgt || !Array.isArray(values)) return;
+        values.forEach(v => {
+          const k = tgt + ":" + v;
+          bigAttrCount[fName][k] = (bigAttrCount[fName][k] || 0) + 1;
+        });
+      });
+    });
+  });
+
+  fNames.forEach(fName => {
+    const fi = idToIdx["b:" + fName];
+    ATTR_CATS.forEach(cat => {
+      const same = [];
+      Object.entries(bigAttrCount[fName]).forEach(([k, c]) => {
+        if (k.startsWith(cat.id + ":")) same.push({ k, c });
+      });
+      same.sort((a, b) => b.c - a.c);
+      same.slice(0, 10).forEach(({ k, c }) => {
+        const ti = idToIdx["a:" + k];
+        if (ti !== undefined)
+          edges.push({ from: fi, to: ti, kind: "b-a", strength: 0.5 + Math.min(c, 8) * 0.12 });
+      });
+    });
+  });
+
+  // attr ↔ attr complement edges — clusters related attrs (e.g. a
+  // mood and its preferred groove) even when no single instrument
+  // family anchors them together.
+  buildAttrComplementEdges(attrNodes, attrLocalIdx, data, []).forEach(e => {
+    edges.push({ from: e.from + bigsNodes.length, to: e.to + bigsNodes.length, kind: "compl", strength: e.strength });
+  });
+
+  runForceLayout(forceNodes, edges, 200);
+
+  const bigs = forceNodes.filter(n => n.kind === "big");
+  const attributes = forceNodes.filter(n => n.kind === "attribute");
   const bigByName = {}; bigs.forEach(b => { bigByName[b.name] = b; });
+
+  // Per-instrument attr lookup — used by allEdges to draw mid→attr lines
+  // and by UI to surface "related vibes" for an instrument.
+  const attrLookup = s => {
+    const entry = suggestion[s.name];
+    if (!entry || typeof entry !== "object") return [];
+    const res = [];
+    Object.entries(entry).forEach(([field, values]) => {
+      const tgt = COMP_FIELD_TO_CAT[field];
+      if (!tgt || !Array.isArray(values)) return;
+      values.forEach(v => {
+        const node = attrByKey[tgt + ":" + v];
+        if (node) res.push(node);
+      });
+    });
+    return res;
+  };
 
   const midsRaw = [];
   fNames.forEach(fName => {
@@ -1003,8 +1080,9 @@ function buildInstrumentsLayout(data) {
       midsRaw.push({ kind: "mid", name: iName, parent: fName });
     });
   });
-  const { mids, midsByKey } = placeMidsOrbital(midsRaw, bigByName, null, null);
+  const { mids, midsByKey } = placeMidsOrbital(midsRaw, bigByName, attrByKey, attrLookup);
   declusterTier(mids, MID_R * 2 * MID_MULT + 0.4, 15);
+  declusterTier(attributes, ATTR_R * 2 * ATTR_MULT + 0.25, 10);
 
   const smallsRaw = [];
   fNames.forEach(fName => {
@@ -1020,11 +1098,37 @@ function buildInstrumentsLayout(data) {
 
   return {
     kind: "instruments",
-    bigs, mids, smalls, attributes: [],
+    bigs, mids, smalls, attributes,
     bigByName, midsByKey, data,
     bigLabel: "Family", midLabel: "Instrument", smallLabel: "Articulation",
-    hasSmalls: true, hasAttrs: false,
-    midToAttrs: () => [], attrToMids: () => [], bigAttrEdges: () => [],
+    hasSmalls: true, hasAttrs: true,
+    midToAttrs: mid => attrLookup(mid).map(n => ({ node: n, cat: ATTR_CAT_BY_ID[n.categoryId] })),
+    attrToMids: (attr, cap = 15) => {
+      const field = CAT_TO_COMP_FIELD[attr.categoryId];
+      if (!field) return [];
+      const res = [];
+      for (const s of mids) {
+        if (res.length >= cap) break;
+        const entry = suggestion[s.name];
+        if (entry && Array.isArray(entry[field]) && entry[field].includes(attr.name)) res.push(s);
+      }
+      return res;
+    },
+    bigAttrEdges: big => {
+      const out = [];
+      const counts = bigAttrCount[big.name] || {};
+      ATTR_CATS.forEach(cat => {
+        const same = [];
+        Object.entries(counts).forEach(([k, c]) => { if (k.startsWith(cat.id + ":")) same.push({ k, c }); });
+        same.sort((a, b) => b.c - a.c);
+        same.slice(0, 6).forEach(({ k }) => {
+          const name = k.substring(cat.id.length + 1);
+          const node = attrByKey[cat.id + ":" + name];
+          if (node) out.push({ node, cat });
+        });
+      });
+      return out;
+    },
   };
 }
 
@@ -2303,7 +2407,7 @@ function HoverTooltip({ hovered, focused = null, livePosRef = null }) {
 // zoom). Without this cancel, the lerp pulls camera + target back each
 // frame while the user's input is fighting to move them — producing
 // the "stuck, snaps back, works again after a few seconds" symptom.
-function CameraRig({ focusTarget, resetCount, controlsRef, animatingRef, syncAnimating, followingRef, livePosRef }) {
+function CameraRig({ focusTarget, cameraGoto, controlsRef, animatingRef, syncAnimating, followingRef, livePosRef }) {
   const { camera } = useThree();
   const destPos = useRef(new THREE.Vector3(0, 15, 130));
   const destTgt = useRef(new THREE.Vector3());
@@ -2352,13 +2456,13 @@ function CameraRig({ focusTarget, resetCount, controlsRef, animatingRef, syncAni
   }, [focusTarget]);
 
   useEffect(() => {
-    if (!resetCount) return;
-    destPos.current.set(0, 15, 130);
-    destTgt.current.set(0, 0, 0);
+    if (!cameraGoto || cameraGoto.n === 0) return;
+    destPos.current.set(cameraGoto.pos[0], cameraGoto.pos[1], cameraGoto.pos[2]);
+    destTgt.current.set(cameraGoto.tgt[0], cameraGoto.tgt[1], cameraGoto.tgt[2]);
     setAnimating(true);
-    if (followingRef) followingRef.current = false; // reset ≠ follow anything
+    if (followingRef) followingRef.current = false; // explicit camera move ≠ follow
     flyInComplete.current = false;
-  }, [resetCount]);
+  }, [cameraGoto]);
 
   useFrame((_, dt) => {
     // Case 1: initial fly-in — lerp hard toward destPos / live target.
@@ -2499,6 +2603,40 @@ function FreeFlightNav({ controlsRef, keysDownRef, syncAnimating, releaseFollow 
       controlsRef.current.target.add(deltaPos);
       controlsRef.current.update();
     }
+  });
+  return null;
+}
+
+// AutoSpinInPlace — replaces OrbitControls.autoRotate. The built-in
+// autoRotate orbits the camera around controls.target, which looks like
+// "circling an empty point" when target is (0,0,0) and the user isn't
+// specifically gazing at the origin. This component instead rotates
+// the target around the camera's own position, which yaws the view on
+// the spot — the natural "I stand still and look around" motion.
+//
+// Pauses while user is interacting (drag / wheel), while a fly-in lerp
+// is running, and while steady-follow is glued to a moving focus
+// target (both would fight this rotation). Matches the disable logic
+// of the previous OrbitControls.autoRotate prop.
+function AutoSpinInPlace({ active, speed, controlsRef, animatingRef, followingRef, interacting }) {
+  const { camera } = useThree();
+  useFrame((_, dt) => {
+    if (!active || interacting) return;
+    if (animatingRef?.current) return;
+    if (followingRef?.current) return;
+    const controls = controlsRef.current;
+    if (!controls) return;
+    // Match OrbitControls' autoRotateSpeed units: rad/sec = 2π/60 * speed.
+    // speed ≈ 0.18 (default slider value) → ~0.019 rad/sec → 5 min / rev.
+    const angle = dt * (Math.PI * 2 / 60) * speed;
+    if (Math.abs(angle) < 1e-6) return;
+    const dx = controls.target.x - camera.position.x;
+    const dz = controls.target.z - camera.position.z;
+    const cosA = Math.cos(angle);
+    const sinA = Math.sin(angle);
+    controls.target.x = camera.position.x + dx * cosA - dz * sinA;
+    controls.target.z = camera.position.z + dx * sinA + dz * cosA;
+    controls.update();
   });
   return null;
 }
@@ -3453,39 +3591,78 @@ function FocusHUD({ focused, layout }) {
   );
 }
 
-function ResetViewButton({ onReset, hasFocus }) {
+// CENTER — snaps the camera to the origin (0,0,0) so the user stands
+// at the exact middle of the galaxy. With AutoSpinInPlace on, stars
+// orbit around them. Not a mode, just a snap — scrolling out moves
+// the camera off-origin naturally via OrbitControls zoom.
+function CenterButton({ onCenter }) {
   return (
     <div
-      onClick={onReset}
-      title="Reset view (Esc)"
+      onClick={onCenter}
+      title="Jump to the center of the galaxy"
       style={{
-        background: "rgba(10,10,15,0.92)", border: `1px solid ${T.borderHi}`,
+        background: "rgba(94,106,210,0.22)",
+        border: `1px solid ${T.accent}`,
         borderRadius: T.r_md, padding: "10px 22px", cursor: "pointer",
-        color: T.textSec, fontSize: 13, fontFamily: T.fontMono, fontWeight: 500,
+        color: T.text, fontSize: 13, fontFamily: T.fontMono, fontWeight: 600,
         letterSpacing: ".18em", textTransform: "uppercase", userSelect: "none",
-        transition: "color 120ms, border-color 120ms, transform 120ms",
-        boxShadow: "0 4px 16px rgba(0,0,0,0.4)",
+        display: "flex", alignItems: "center", gap: 10,
+        transition: "background 120ms, transform 120ms, box-shadow 120ms",
+        boxShadow: "0 4px 20px rgba(94,106,210,0.35)",
       }}
       onMouseEnter={e => {
-        e.currentTarget.style.color = T.text;
-        e.currentTarget.style.borderColor = T.accent;
-        e.currentTarget.style.transform = "scale(1.04)";
+        e.currentTarget.style.background = "rgba(94,106,210,0.38)";
+        e.currentTarget.style.transform = "scale(1.05)";
       }}
       onMouseLeave={e => {
-        e.currentTarget.style.color = T.textSec;
-        e.currentTarget.style.borderColor = T.borderHi;
+        e.currentTarget.style.background = "rgba(94,106,210,0.22)";
         e.currentTarget.style.transform = "scale(1)";
       }}
     >
-      ⟲ reset view
+      <span style={{ fontSize: 15, lineHeight: 1 }}>⊙</span>
+      <span>center</span>
     </div>
   );
 }
 
-// Auto-rotate pill. Visually matches ResetViewButton so the two sit in a
-// cohesive toolbar. When rotation is active the icon spins and the border
-// takes on the accent color; when paused it's muted. Primary interaction,
-// not a configuration setting — belongs in the map, not the side panel.
+// NEURAL — the new default view. Wide overview from outside the
+// galaxy with all connection edges on, filters cleared, focus
+// dropped, search cleared. Differs from CENTER in that it also
+// restores app-level state to "fresh exploration" while CENTER only
+// moves the camera.
+function NeuralButton({ onNeural }) {
+  return (
+    <div
+      onClick={onNeural}
+      title="Overview with all connections visible"
+      style={{
+        background: "rgba(20,184,166,0.18)",
+        border: `1px solid #14B8A6`,
+        borderRadius: T.r_md, padding: "10px 22px", cursor: "pointer",
+        color: T.text, fontSize: 13, fontFamily: T.fontMono, fontWeight: 600,
+        letterSpacing: ".18em", textTransform: "uppercase", userSelect: "none",
+        display: "flex", alignItems: "center", gap: 10,
+        transition: "background 120ms, transform 120ms, box-shadow 120ms",
+        boxShadow: "0 4px 20px rgba(20,184,166,0.28)",
+      }}
+      onMouseEnter={e => {
+        e.currentTarget.style.background = "rgba(20,184,166,0.32)";
+        e.currentTarget.style.transform = "scale(1.05)";
+      }}
+      onMouseLeave={e => {
+        e.currentTarget.style.background = "rgba(20,184,166,0.18)";
+        e.currentTarget.style.transform = "scale(1)";
+      }}
+    >
+      <span style={{ fontSize: 15, lineHeight: 1, color: "#14B8A6" }}>✦</span>
+      <span>neural</span>
+    </div>
+  );
+}
+
+// Auto-rotate pill. Visually matches the muted toolbar pills so the set
+// sits cohesively — the two accent-tinted buttons (CENTER, NEURAL)
+// stand out as primary actions, while this one is a state toggle.
 function AutoRotateButton({ on, onToggle }) {
   return (
     <div
@@ -3595,16 +3772,17 @@ function ExitFocusButton({ onExit }) {
 // EXIT FOCUS pill gets prime (leftmost) placement — that's the primary
 // action users want while exploring a node. Auto-rotate and Reset View
 // remain always-visible to the right.
-function MapToolbar({ autoRotate, onToggleAutoRotate, onReset, hasFocus, onExitFocus, onRandom, canRandom }) {
+function MapToolbar({ autoRotate, onToggleAutoRotate, onCenter, onNeural, hasFocus, onExitFocus, onRandom, canRandom }) {
   return (
     <div style={{
       position: "absolute", bottom: 20, left: "50%", transform: "translateX(-50%)",
       display: "flex", gap: 12, alignItems: "center", zIndex: 10,
     }}>
       {hasFocus && <ExitFocusButton onExit={onExitFocus} />}
+      <CenterButton onCenter={onCenter} />
       <RandomButton onRandom={onRandom} disabled={!canRandom} />
       <AutoRotateButton on={autoRotate} onToggle={onToggleAutoRotate} />
-      <ResetViewButton onReset={onReset} hasFocus={hasFocus} />
+      <NeuralButton onNeural={onNeural} />
     </div>
   );
 }
@@ -3665,10 +3843,15 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
   const [hovered, setHovered] = useState(null);
   const [hoveredEdgeIdx, setHoveredEdgeIdx] = useState(-1);      // index into focus-lines
   const [hoveredAllEdgeIdx, setHoveredAllEdgeIdx] = useState(-1); // index into allEdges
-  const [linesMode, setLinesMode] = useState("auto");   // "off" | "auto" | "on"
+  const [linesMode, setLinesMode] = useState("on");   // "off" | "auto" | "on"
   const [autoRotate, setAutoRotate] = useState(false);
   const [interacting, setInteracting] = useState(false);
-  const [resetCount, setResetCount] = useState(0);
+  // Camera goto — tells CameraRig to fly to an explicit (pos, tgt).
+  // The `n` counter forces the effect to re-fire even when pos/tgt
+  // happen to match a previous target. Replaces the older resetCount
+  // pattern so we can have multiple named destinations (center, neural,
+  // whatever comes next) without adding per-destination refs.
+  const [cameraGoto, setCameraGoto] = useState({ pos: [0, 15, 130], tgt: [0, 0, 0], n: 0 });
 
   // Filtering panel — multi-select membership sets. `null` = all shown
   // (no filter). Explicit `Set` = only those values pass the filter. An
@@ -4370,14 +4553,27 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
     else if (target.kind === "attribute") selectAttr(target);
   };
 
-  const handleReset = () => {
+  const handleNeural = () => {
     setFocused(null);
     setFilters({ bigs: null, mids: null, smalls: null, attrCats: null, attrs: null });
     setSearch("");
-    setResetCount(c => c + 1);
-    // Pause auto-rotate briefly so the reset lerp doesn't tug-of-war with
-    // the OrbitControls rotating the camera around the target. Without this,
-    // reset visibly jitters back and forth.
+    setLinesMode("on");
+    setCameraGoto(prev => ({ pos: [0, 15, 130], tgt: [0, 0, 0], n: prev.n + 1 }));
+    // Pause auto-rotate briefly so the goto lerp doesn't tug-of-war with
+    // the spin. Without this, the fly-in visibly drifts sideways.
+    setInteracting(true);
+    if (interactionTimer.current) clearTimeout(interactionTimer.current);
+    interactionTimer.current = setTimeout(() => setInteracting(false), 1800);
+  };
+
+  // CENTER — drop focus (so CameraRig doesn't override with focus lerp)
+  // then fly to the exact origin. Using target at (0,0,-1) gives the
+  // camera a defined forward direction without which OrbitControls'
+  // azimuth becomes undefined. Distance is within the new minDistance
+  // of 0.3, so zoom-in is immediately available.
+  const handleCenter = () => {
+    setFocused(null);
+    setCameraGoto(prev => ({ pos: [0, 0, 0], tgt: [0, 0, -1], n: prev.n + 1 }));
     setInteracting(true);
     if (interactionTimer.current) clearTimeout(interactionTimer.current);
     interactionTimer.current = setTimeout(() => setInteracting(false), 1800);
@@ -4588,7 +4784,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
         <OrbitControls
           ref={controlsRef}
           enableDamping dampingFactor={0.15}
-          minDistance={2} maxDistance={260}
+          minDistance={0.3} maxDistance={800}
           // Pull polar limits a hair inside the exact poles. At exactly
           // 0 or π the camera is colinear with world-up and azimuth
           // becomes ambiguous (gimbal lock) — drag then flails. The
@@ -4596,11 +4792,11 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
           // top-to-bottom sweep.
           minPolarAngle={0.01} maxPolarAngle={Math.PI - 0.01}
           rotateSpeed={0.95} zoomSpeed={0.95} panSpeed={0.6}
-          autoRotate={autoRotate && !interacting && !cameraAnimating} autoRotateSpeed={rotateSpeed}
           onStart={() => { syncCameraAnimating(false); releaseCameraFollow(); }}
           mouseButtons={{ LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: null }}
         />
-        <CameraRig focusTarget={focused} resetCount={resetCount} controlsRef={controlsRef} animatingRef={cameraAnimatingRef} syncAnimating={syncCameraAnimating} followingRef={cameraFollowingRef} livePosRef={livePosRef} />
+        <AutoSpinInPlace active={autoRotate} speed={rotateSpeed} controlsRef={controlsRef} animatingRef={cameraAnimatingRef} followingRef={cameraFollowingRef} interacting={interacting} />
+        <CameraRig focusTarget={focused} cameraGoto={cameraGoto} controlsRef={controlsRef} animatingRef={cameraAnimatingRef} syncAnimating={syncCameraAnimating} followingRef={cameraFollowingRef} livePosRef={livePosRef} />
         <FreeFlightNav controlsRef={controlsRef} keysDownRef={keyboardMoveRef} syncAnimating={syncCameraAnimating} releaseFollow={releaseCameraFollow} />
       </Canvas>
 
@@ -4622,7 +4818,8 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
       <MapToolbar
         autoRotate={autoRotate}
         onToggleAutoRotate={() => setAutoRotate(v => !v)}
-        onReset={handleReset}
+        onCenter={handleCenter}
+        onNeural={handleNeural}
         hasFocus={!!focused}
         onExitFocus={() => setFocused(null)}
         onRandom={handleRandomize}
