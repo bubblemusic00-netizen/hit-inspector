@@ -2440,32 +2440,18 @@ function computeFocusPairings(focused, layout) {
   return out;
 }
 
-// FocusHologram — holographic side-panel that floats next to the
-// focused element. Rendered instead of the normal accent label
-// (NodeLabels suppresses the focused item when this is active). Keeps
-// the panel anchored to the element's LIVE position every frame so
-// orbiting smalls don't leave the hologram behind.
+// FocusHologram — info HUD that appears when exactly one element is
+// focused. Upper-left of the viewport, fixed position, no panel
+// backdrop, no chip boxes around pairings — just glowing neon text.
 //
-// Visual language: matrix-film green on near-black, rectangular
-// monospace panel with neon edge glow, name typed out one character
-// at a time with a blinking caret — the cyberpunk HUD look the user
-// asked for. Pairings listed under the name as chip-style items,
-// grouped by attribute category.
-function FocusHologram({ focused, layout, livePosRef }) {
-  const groupRef = useRef();
-
-  useFrame(() => {
-    if (!focused || !groupRef.current) return;
-    let p = focused.pos;
-    if (livePosRef && focused.kind === "small" && focused.grandparent) {
-      const live = livePosRef.current.get(
-        focused.grandparent + "/" + focused.parent + "/" + focused.name
-      );
-      if (live) p = live;
-    }
-    if (p) groupRef.current.position.set(p[0], p[1], p[2]);
-  });
-
+// Name types out via a ref + rAF loop writing directly to textContent
+// (zero React re-renders during the typing). Pairings and the caret
+// are plain CSS — the caret blinks via infinite keyframe, pairings
+// appear immediately once mounted. The previous staggered CSS reveal
+// was removed because scoped keyframe names plus remount-on-focus
+// was producing race conditions where items never un-hid on some
+// focus clicks, making the hologram look like it wasn't working.
+const FocusHologram = React.memo(function FocusHologram({ focused, layout }) {
   const pairings = useMemo(
     () => computeFocusPairings(focused, layout),
     [focused, layout],
@@ -2473,137 +2459,146 @@ function FocusHologram({ focused, layout, livePosRef }) {
 
   const targetName = focused ? (focused.label || focused.name || "") : "";
 
-  // Typing animation — re-seeds every time targetName changes (new
-  // focus). CHAR_DELAY tuned so a ~20-char name finishes typing in
-  // under a second, matching the camera-fly-in pace.
-  const [displayedName, setDisplayedName] = useState("");
+  // Typing via direct DOM write. rAFs until all chars shown, then
+  // stops. Main thread untouched by React re-renders during fly-in.
+  const nameRef = useRef(null);
   useEffect(() => {
-    setDisplayedName("");
+    if (!nameRef.current) return;
+    const el = nameRef.current;
+    el.textContent = "";
     if (!targetName) return;
     let i = 0;
-    const CHAR_DELAY = 42;
-    const timer = setInterval(() => {
-      i++;
-      setDisplayedName(targetName.slice(0, i));
-      if (i >= targetName.length) clearInterval(timer);
-    }, CHAR_DELAY);
-    return () => clearInterval(timer);
+    const DELAY = 38;
+    let last = performance.now();
+    let rafId = 0;
+    let stopped = false;
+    const tick = (now) => {
+      if (stopped) return;
+      if (now - last >= DELAY) {
+        i++;
+        if (el.isConnected) el.textContent = targetName.slice(0, i);
+        last = now;
+      }
+      if (i < targetName.length) {
+        rafId = requestAnimationFrame(tick);
+      }
+    };
+    rafId = requestAnimationFrame(tick);
+    return () => { stopped = true; if (rafId) cancelAnimationFrame(rafId); };
   }, [targetName]);
 
-  // Caret blink — independent of typing so it blinks during AND after
-  // the type-out.
-  const [caretOn, setCaretOn] = useState(true);
-  useEffect(() => {
-    const t = setInterval(() => setCaretOn(s => !s), 520);
-    return () => clearInterval(t);
-  }, []);
+  if (!focused) return null;
 
-  if (!focused || !focused.pos) return null;
+  const MATRIX = "#39ff41";
 
-  const MATRIX      = "#39ff41";
-  const MATRIX_DIM  = "rgba(57,255,65,0.34)";
-  const MATRIX_SOFT = "rgba(57,255,65,0.08)";
+  const kindTag =
+    focused.kind === "attribute" ? "ATTR" :
+    focused.kind === "small"     ? "MICRO" :
+    focused.kind === "mid"       ? (layout.midLabel || "NODE").toUpperCase() :
+                                   (layout.bigLabel || "ROOT").split(" ")[0].toUpperCase();
 
   return (
-    <group ref={groupRef}>
-      <Html center={false} distanceFactor={10} zIndexRange={[220, 120]}
-            style={{ pointerEvents: "none" }}>
+    <div style={{
+      position: "absolute",
+      top: 170,
+      left: 24,
+      width: 310,
+      maxHeight: "calc(100vh - 220px)",
+      overflowY: "auto",
+      overflowX: "hidden",
+      pointerEvents: "none",
+      userSelect: "none",
+      color: MATRIX,
+      fontFamily: "ui-monospace, 'Geist Mono', 'SF Mono', Menlo, monospace",
+      zIndex: 22,
+    }}>
+      {/* Caret blink — pure CSS, no React state */}
+      <style>{`
+        @keyframes fh-caret-blink {
+          0%, 50%      { opacity: 1; }
+          50.01%, 100% { opacity: 0; }
+        }
+      `}</style>
+
+      {/* Kind tag */}
+      <div style={{
+        fontSize: 8.5, letterSpacing: "0.3em", fontWeight: 700,
+        opacity: 0.75,
+        textShadow: `0 0 4px ${MATRIX}`,
+        marginBottom: 4,
+      }}>
+        ◌ {kindTag}
+      </div>
+
+      {/* Name — typed via rAF into the empty span */}
+      <div style={{
+        fontSize: 20, fontWeight: 800, letterSpacing: "0.08em",
+        textTransform: "uppercase",
+        textShadow:
+          `0 0 6px ${MATRIX}, ` +
+          `0 0 16px rgba(57,255,65,0.7), ` +
+          `0 0 32px rgba(57,255,65,0.4)`,
+        minHeight: 26,
+        lineHeight: 1.2,
+        marginBottom: 14,
+        wordBreak: "break-word",
+      }}>
+        <span ref={nameRef} />
+        <span style={{
+          display: "inline-block",
+          width: 10, height: 18,
+          marginLeft: 3, marginBottom: -2,
+          background: MATRIX,
+          boxShadow: `0 0 8px ${MATRIX}`,
+          verticalAlign: "baseline",
+          animation: "fh-caret-blink 1.04s steps(1, end) infinite",
+        }} />
+      </div>
+
+      {/* Pairings — plain neon text, no chip boxes, separators soft */}
+      {pairings.length === 0 ? (
         <div style={{
-          position: "absolute",
-          // Offset up and to the right of the star so the star itself
-          // stays fully visible; the hologram reads as a HUD element
-          // attached to it, not a label covering it.
-          left: 34, top: -48,
-          minWidth: 240, maxWidth: 340,
-          padding: "14px 16px 13px",
-          background: "linear-gradient(180deg, rgba(0,18,6,0.93) 0%, rgba(0,8,2,0.89) 100%)",
-          border: `1px solid ${MATRIX}`,
-          borderRadius: 0,
-          boxShadow:
-            `0 0 12px rgba(57,255,65,0.42), ` +
-            `inset 0 0 22px rgba(57,255,65,0.09), ` +
-            `0 0 38px rgba(57,255,65,0.18)`,
-          color: MATRIX,
-          fontFamily: "ui-monospace, 'Geist Mono', 'SF Mono', Menlo, monospace",
-          userSelect: "none",
+          fontSize: 10, opacity: 0.55, letterSpacing: "0.18em",
+          textTransform: "uppercase",
+          textShadow: `0 0 4px ${MATRIX}`,
         }}>
-          {/* Corner tick marks — four L-shapes at the panel corners.
-              Pure decoration, sells the HUD read. */}
-          {[
-            { top: -1,    left: -1,    borderTop: `2px solid ${MATRIX}`, borderLeft:  `2px solid ${MATRIX}` },
-            { top: -1,    right: -1,   borderTop: `2px solid ${MATRIX}`, borderRight: `2px solid ${MATRIX}` },
-            { bottom: -1, left: -1,    borderBottom: `2px solid ${MATRIX}`, borderLeft:  `2px solid ${MATRIX}` },
-            { bottom: -1, right: -1,   borderBottom: `2px solid ${MATRIX}`, borderRight: `2px solid ${MATRIX}` },
-          ].map((s, i) => (
-            <span key={i} style={{ position: "absolute", width: 8, height: 8, ...s }} />
-          ))}
-
-          {/* Name with type-out + blinking caret */}
-          <div style={{
-            fontSize: 17, fontWeight: 800, letterSpacing: "0.08em",
-            textTransform: "uppercase",
-            textShadow: `0 0 6px ${MATRIX}, 0 0 14px rgba(57,255,65,0.7)`,
-            minHeight: 22,
-            lineHeight: 1.2,
-            marginBottom: 10,
-            wordBreak: "break-word",
-          }}>
-            {displayedName}
-            <span style={{
-              display: "inline-block",
-              width: 9, height: 16,
-              marginLeft: 3, marginBottom: -2,
-              background: caretOn ? MATRIX : "transparent",
-              boxShadow: caretOn ? `0 0 6px ${MATRIX}` : "none",
-              verticalAlign: "baseline",
-            }} />
-          </div>
-
-          {/* Scanline separator */}
-          <div style={{
-            height: 1,
-            background: `linear-gradient(90deg, ${MATRIX} 0%, rgba(57,255,65,0.6) 40%, transparent 100%)`,
-            marginBottom: 10,
-            boxShadow: `0 0 4px ${MATRIX}`,
-          }} />
-
-          {/* Pairings grouped by category */}
-          {pairings.length === 0 ? (
-            <div style={{ fontSize: 10, opacity: 0.55, letterSpacing: "0.16em", textTransform: "uppercase" }}>
-              » no pairings indexed
-            </div>
-          ) : (
-            <div>
-              {pairings.map(group => (
-                <div key={group.key} style={{ marginBottom: 9 }}>
-                  <div style={{
-                    fontSize: 9, letterSpacing: "0.22em",
-                    opacity: 0.7, textTransform: "uppercase",
-                    marginBottom: 4,
-                  }}>
-                    » {group.label}
-                  </div>
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 3 }}>
-                    {group.items.map(item => (
-                      <span key={item} style={{
-                        padding: "1px 7px",
-                        border: `1px solid ${MATRIX_DIM}`,
-                        background: MATRIX_SOFT,
-                        fontSize: 10,
-                        lineHeight: 1.5,
-                        whiteSpace: "nowrap",
-                      }}>{item}</span>
-                    ))}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
+          » no pairings indexed
         </div>
-      </Html>
-    </group>
+      ) : (
+        <div>
+          {pairings.map(group => (
+            <div key={group.key} style={{ marginBottom: 10 }}>
+              <div style={{
+                fontSize: 9, letterSpacing: "0.26em",
+                opacity: 0.7, textTransform: "uppercase",
+                marginBottom: 4,
+                textShadow: `0 0 4px ${MATRIX}`,
+              }}>
+                » {group.label}
+              </div>
+              <div style={{
+                fontSize: 12,
+                lineHeight: 1.55,
+                textShadow:
+                  `0 0 4px rgba(57,255,65,0.7), ` +
+                  `0 0 12px rgba(57,255,65,0.35)`,
+              }}>
+                {group.items.map((item, idx) => (
+                  <span key={item}>
+                    {idx > 0 && (
+                      <span style={{ opacity: 0.35, margin: "0 6px" }}>·</span>
+                    )}
+                    {item}
+                  </span>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   );
-}
+});
 
 // HoverTooltip — displays the hovered node's name at its world position.
 // Critical: orbiting smalls rewrite their world position via the shared
@@ -2672,16 +2667,33 @@ function CameraRig({ focusTarget, cameraGoto, controlsRef, animatingRef, syncAni
   const { camera } = useThree();
   const destPos = useRef(new THREE.Vector3(0, 30, 230));
   const destTgt = useRef(new THREE.Vector3());
-  // flyInComplete — true once the initial lerp has converged on the
-  // target position. After this point we switch from "lerp towards a
-  // goal" to "rig the camera to the moving target" (steady follow).
-  // This matters for smalls, which orbit their parent mid every frame
-  // — without follow, the camera arrives at the small's position and
-  // then watches it drift out of frame.
+  // flyInComplete — true once the time-based animation has reached T=1.
+  // After this point we switch from "arc toward a goal" to "rig the
+  // camera to the moving target" (steady follow). This matters for
+  // smalls, which orbit their parent mid every frame — without follow,
+  // the camera arrives at the small's position and watches it drift
+  // out of frame.
   const flyInComplete = useRef(false);
   // scratch vectors reused per frame (avoid per-tick allocations)
   const liveTgt = useRef(new THREE.Vector3());
   const delta   = useRef(new THREE.Vector3());
+  // Animation state. Every fly-in (focus OR cameraGoto) fills these
+  // in and then useFrame walks T from 0 → 1 over `duration` seconds.
+  // Replaces the old exponential-decay lerp which never truly
+  // converged, had two competing rates for pos vs tgt, and jerked
+  // visibly when a new focus arrived mid-flight (rate × (pos - newDest)
+  // flipped direction instantly). Time-based easing gives a stable
+  // Google-Earth-style arc that re-seeds cleanly from any interrupt.
+  const anim = useRef({
+    startPos:     new THREE.Vector3(),
+    startTgt:     new THREE.Vector3(),
+    controlPoint: new THREE.Vector3(),
+    endOffset:    new THREE.Vector3(),  // endPos − endTgt at seed time; keeps camera offset consistent while target moves
+    t:            0,
+    duration:     1.0,
+  });
+  const endPosScratch = useRef(new THREE.Vector3());
+  const midScratch    = useRef(new THREE.Vector3());
 
   const setAnimating = (v) => {
     if (animatingRef) animatingRef.current = v;
@@ -2700,6 +2712,40 @@ function CameraRig({ focusTarget, cameraGoto, controlsRef, animatingRef, syncAni
     }
     if (focusTarget?.pos) { liveTgt.current.set(focusTarget.pos[0], focusTarget.pos[1], focusTarget.pos[2]); return true; }
     return false;
+  };
+
+  // seedFlyIn — stores the current camera state as the start of a new
+  // eased animation, computes the Bezier control point (arc peak),
+  // and picks a duration scaled to travel distance. Callers fill in
+  // destPos.current + destTgt.current before invoking this, then set
+  // animatingRef / followingRef.
+  const seedFlyIn = () => {
+    anim.current.startPos.copy(camera.position);
+    anim.current.startTgt.copy(controlsRef.current ? controlsRef.current.target : destTgt.current);
+    anim.current.endOffset.copy(destPos.current).sub(destTgt.current);
+    anim.current.t = 0;
+
+    const travelDist = camera.position.distanceTo(destPos.current);
+    // Duration floor keeps short hops readable (otherwise a 5-unit
+    // small-to-small switch completes in two frames); ceiling keeps
+    // long Neural trips from feeling sluggish. Linear 0.6 → 1.6s.
+    anim.current.duration = Math.max(0.6, Math.min(1.6, 0.55 + travelDist / 100));
+
+    // Control point for quadratic Bezier: midpoint pushed outward
+    // from the galaxy center by a fraction of travel distance. The
+    // result is an arcing trajectory — camera lifts away from the
+    // galaxy, passes over, descends into the destination. Scales
+    // down to near-zero for tiny hops so close neighbors interpolate
+    // almost straight-line (no weird loop-up for a 2-unit trip).
+    midScratch.current.addVectors(anim.current.startPos, destPos.current).multiplyScalar(0.5);
+    const arcLift = Math.min(35, travelDist * 0.22);
+    // Prefer lifting outward-from-origin so the arc passes above the
+    // galaxy rather than through it. Fall back to world-up if the
+    // midpoint happens to be near origin.
+    const outward = midScratch.current.clone();
+    if (outward.lengthSq() < 0.1) outward.set(0, 1, 0);
+    else outward.normalize();
+    anim.current.controlPoint.copy(midScratch.current).addScaledVector(outward, arcLift);
   };
 
   useEffect(() => {
@@ -2729,6 +2775,7 @@ function CameraRig({ focusTarget, cameraGoto, controlsRef, animatingRef, syncAni
       dir.normalize();
     }
     destPos.current.copy(t.clone().add(dir.multiplyScalar(dist)));
+    seedFlyIn();
     setAnimating(true);
     if (followingRef) followingRef.current = true;
     flyInComplete.current = false;
@@ -2738,40 +2785,71 @@ function CameraRig({ focusTarget, cameraGoto, controlsRef, animatingRef, syncAni
     if (!cameraGoto || cameraGoto.n === 0) return;
     destPos.current.set(cameraGoto.pos[0], cameraGoto.pos[1], cameraGoto.pos[2]);
     destTgt.current.set(cameraGoto.tgt[0], cameraGoto.tgt[1], cameraGoto.tgt[2]);
+    seedFlyIn();
     setAnimating(true);
     if (followingRef) followingRef.current = false; // explicit camera move ≠ follow
     flyInComplete.current = false;
   }, [cameraGoto]);
 
   useFrame((_, dt) => {
-    // Case 1: initial fly-in — lerp hard toward destPos / live target.
-    // This fires for both focus (follow mode on) and reset (follow off).
+    // Case 1: time-based eased Bezier arc fly-in.
+    // Fires for both focus transitions (followingRef=true) and
+    // explicit gotos (followingRef=false; Neural / Dive in).
     if (animatingRef?.current) {
+      // Clamp dt so a stalled frame (React reconcile, edge rebuild,
+      // hologram mount-time work all hitting at once right when the
+      // user clicks a star) doesn't warp the Bezier T forward in one
+      // tick. Without this cap, a 100ms stall advances T by ~6% of
+      // the animation in a single frame — visible as a pop. Capping
+      // to 1/30s means a stalled frame just briefly pauses the glide.
+      const dtSafe = Math.min(dt, 1/30);
+      anim.current.t += dtSafe;
+      const T = Math.min(1, anim.current.t / anim.current.duration);
+
+      // easeInOutCubic — classic slow-start / fast-middle / slow-end
+      // curve. Reads as a deliberate pull-out, glide, and settle —
+      // the Google Earth feel rather than a constant-speed ramp.
+      const easePos = T < 0.5
+        ? 4 * T * T * T
+        : 1 - Math.pow(-2 * T + 2, 3) / 2;
+      // Target leads slightly so the star centers before the camera
+      // finishes arriving. easeOutQuad on a scaled T.
+      const Tt = Math.min(1, T * 1.35);
+      const easeTgt = 1 - (1 - Tt) * (1 - Tt);
+
+      // End target: the live position (for moving smalls) when
+      // following, else the static dest. End camera position is that
+      // target plus the stored offset — keeps the camera's approach
+      // angle stable even as the target drifts.
       const hasLive = readLivePos();
-      // Split rates: target chases the focus fast (~0.3s to orient),
-      // camera position glides in slower (~1.5s). The net effect is
-      // "lock the star in the center FIRST, then zoom in" — avoids
-      // the old behavior where camera and orientation swung together,
-      // which could read as a curved sideways dive instead of a
-      // clean approach. Ignored for non-focus gotos (Neural/Center)
-      // where followingRef is false — both rates stay moderate so
-      // those transitions feel snappy, not staged.
-      const isFocusFly = followingRef?.current === true;
-      const k_pos = Math.min(1, dt * (isFocusFly ? 2.2 : 2.8));
-      const k_tgt = Math.min(1, dt * (isFocusFly ? 6.5 : 2.8));
-      camera.position.lerp(destPos.current, k_pos);
+      const endTgt = hasLive && followingRef?.current ? liveTgt.current : destTgt.current;
+      endPosScratch.current.copy(endTgt).add(anim.current.endOffset);
+
+      // Quadratic Bezier: P(T) = (1−u)²·start + 2u(1−u)·control + u²·end
+      const u = easePos;
+      const one_u = 1 - u;
+      const w0 = one_u * one_u;
+      const w1 = 2 * one_u * u;
+      const w2 = u * u;
+      camera.position.set(
+        w0 * anim.current.startPos.x + w1 * anim.current.controlPoint.x + w2 * endPosScratch.current.x,
+        w0 * anim.current.startPos.y + w1 * anim.current.controlPoint.y + w2 * endPosScratch.current.y,
+        w0 * anim.current.startPos.z + w1 * anim.current.controlPoint.z + w2 * endPosScratch.current.z,
+      );
       if (controlsRef.current) {
-        const goal = hasLive && followingRef?.current ? liveTgt.current : destTgt.current;
-        controlsRef.current.target.lerp(goal, k_tgt);
+        controlsRef.current.target.lerpVectors(anim.current.startTgt, endTgt, easeTgt);
         controlsRef.current.update();
       }
-      // Converged? Stop the lerp. If we're following, the steady-follow
-      // branch below takes over without a visible seam.
-      const tgtGoal = controlsRef.current?.target
-        ? (readLivePos() && followingRef?.current ? liveTgt.current : destTgt.current)
-        : destTgt.current;
-      if (camera.position.distanceTo(destPos.current) < 0.07 &&
-          (!controlsRef.current || controlsRef.current.target.distanceTo(tgtGoal) < 0.15)) {
+
+      if (T >= 1) {
+        // Pin exactly to the destination so the steady-follow phase
+        // starts from a clean state, not whatever numerical drift
+        // accumulated across the Bezier lerp.
+        camera.position.copy(endPosScratch.current);
+        if (controlsRef.current) {
+          controlsRef.current.target.copy(endTgt);
+          controlsRef.current.update();
+        }
         setAnimating(false);
         flyInComplete.current = true;
       }
@@ -4619,6 +4697,54 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
     return visibleAttributes.filter(a => focusOverride.attrs.has(attrKey(a)));
   }, [layout.hasAttrs, layers.attributes, visibleAttributes, focusOverride]);
 
+  // ── Edge-scoped visibility (filter+layer, NOT focus) ─────────────
+  // CRITICAL for smooth focus transitions. Previously allEdges used
+  // the focus-widened renderedX sets; this meant every click churned
+  // a new 10k-vertex LineSegments2 geometry + GPU upload right as
+  // the fly-in started, reading as a visible stall/FPS drop. These
+  // edgeX sets omit focusOverride so the main galaxy mesh is stable
+  // across focus clicks — only layer toggles or filter changes cause
+  // a rebuild. Focus-lineage edges ride on top via the separate
+  // `lines` mesh (focusLines), which is 30-100 edges and cheap.
+  const edgeBigs = useMemo(() => {
+    if (!layers.bigs) return [];
+    if (!filters.bigs) return layout.bigs;
+    return layout.bigs.filter(b => filters.bigs.has(b.name));
+  }, [layout.bigs, layers.bigs, filters.bigs]);
+
+  const edgeMids = useMemo(() => {
+    if (!layers.mids) return [];
+    return layout.mids.filter(m => {
+      if (filters.mids && !filters.mids.has(m.name)) return false;
+      if (!filters.mids) {
+        if (filters.bigs && !filters.bigs.has(m.parent)) return false;
+      }
+      return true;
+    });
+  }, [layout.mids, layers.mids, filters.bigs, filters.mids]);
+
+  const edgeSmalls = useMemo(() => {
+    if (!layout.hasSmalls || !layers.smalls) return [];
+    return layout.smalls.filter(s => {
+      const sk = smallKey(s);
+      if (filters.smalls && !filters.smalls.has(sk)) return false;
+      if (!filters.smalls) {
+        if (filters.mids && !filters.mids.has(s.parent)) return false;
+        if (filters.bigs && !filters.bigs.has(s.grandparent)) return false;
+      }
+      return true;
+    });
+  }, [layout.smalls, layout.hasSmalls, layers.smalls, filters.bigs, filters.mids, filters.smalls]);
+
+  const edgeAttributes = useMemo(() => {
+    if (!layout.hasAttrs || !layers.attributes) return [];
+    return layout.attributes.filter(a => {
+      if (filters.attrCats && !filters.attrCats.has(a.categoryId)) return false;
+      if (filters.attrs && !filters.attrs.has(attrKey(a))) return false;
+      return true;
+    });
+  }, [layout.attributes, layout.hasAttrs, layers.attributes, filters.attrCats, filters.attrs]);
+
   // ── Search index ──────────────────────────────────────────────────
   const searchIndex = useMemo(() => {
     const out = [];
@@ -4667,21 +4793,60 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
     return s;
   }, [focused, layout]);
 
+  // midPairCache — the O(N²) complement-overlap computation, cached
+  // against the layout (not renderedX). Focus changes renderedX every
+  // time, so doing this work inside the allEdges memo meant re-running
+  // ~90k Set intersections on every click — right during the camera
+  // fly-in, which is exactly the window where the main thread must
+  // stay free. Hoisting it here means the heavy pass runs once per
+  // category switch, and allEdges just reads the result.
+  const midPairCache = useMemo(() => {
+    if (!layout.hasAttrs || !layout.midToAttrs || layout.mids.length <= 1) return null;
+    const MIN_OVERLAP = 2;
+    const midAttrSets = new Map();
+    for (const m of layout.mids) {
+      const attrs = layout.midToAttrs(m) || [];
+      const ks = new Set(attrs.map(({ node }) => `${node.categoryId}:${node.name}`));
+      if (ks.size > 0) midAttrSets.set(m, ks);
+    }
+    const pairsByMid = new Map();
+    for (const m of midAttrSets.keys()) pairsByMid.set(m, []);
+    const midList = [...midAttrSets.keys()];
+    for (let i = 0; i < midList.length; i++) {
+      const a = midList[i];
+      const aSet = midAttrSets.get(a);
+      for (let j = i + 1; j < midList.length; j++) {
+        const b = midList[j];
+        const bSet = midAttrSets.get(b);
+        let shared = 0;
+        const [src, dst] = aSet.size <= bSet.size ? [aSet, bSet] : [bSet, aSet];
+        for (const k of src) if (dst.has(k)) shared++;
+        if (shared >= MIN_OVERLAP) {
+          pairsByMid.get(a).push({ other: b, score: shared });
+          pairsByMid.get(b).push({ other: a, score: shared });
+        }
+      }
+    }
+    for (const pairs of pairsByMid.values()) pairs.sort((x, y) => y.score - x.score);
+    return pairsByMid;
+  }, [layout]);
+
   const allEdges = useMemo(() => {
     const out = [];
-    // Use renderedX so edges are drawn ONLY when both endpoints will
-    // actually show on screen. When a tier's layer toggle is off we
-    // effectively erase every edge that touches that tier (except the
-    // focus lineage, which renderedX keeps alive). Previously edges
-    // were built off visibleX, which ignored layer toggles entirely —
-    // and the result was dozens of "ghost lines" shooting out from
-    // bigs to empty space when user turned mid/small off.
-    const renderedBigNames = new Set(renderedBigs.map(b => b.name));
-    const renderedMidKey  = new Set(renderedMids.map(m => `${m.parent}/${m.name}`));
-    const renderedSmallKey = new Set(renderedSmalls.map(s => smallKey(s)));
-    const renderedAttrKey = new Set(renderedAttributes.map(a => `${a.categoryId}:${a.name}`));
+    // Use edgeX so edges are drawn ONLY when both endpoints sit in
+    // the layer+filter permitted set. edgeX is DELIBERATELY NOT
+    // focus-widened — this keeps the main galaxy mesh stable across
+    // focus clicks, avoiding the 10k-vertex LineSegments2 rebuild
+    // that previously stalled the main thread right as the fly-in
+    // started. Focus lineage (edges to the currently-focused star)
+    // is drawn by the separate `lines` mesh via focusLines, which
+    // is small and cheap to rebuild.
+    const renderedBigNames = new Set(edgeBigs.map(b => b.name));
+    const renderedMidKey  = new Set(edgeMids.map(m => `${m.parent}/${m.name}`));
+    const renderedSmallKey = new Set(edgeSmalls.map(s => smallKey(s)));
+    const renderedAttrKey = new Set(edgeAttributes.map(a => `${a.categoryId}:${a.name}`));
 
-    for (const m of renderedMids) {
+    for (const m of edgeMids) {
       const parent = layout.bigByName?.[m.parent];
       if (!parent?.pos || !m.pos) continue;
       if (!renderedBigNames.has(parent.name)) continue;
@@ -4691,12 +4856,12 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
         fromNode: { ...parent, kind: "big" }, toNode: { ...m, kind: "mid" },
       });
     }
-    if (layout.hasSmalls && renderedSmalls.length) {
+    if (layout.hasSmalls && edgeSmalls.length) {
       const midLookup = (sName, gName) =>
         layout.midsByKey?.[sName + "/" + gName] ||
         layout.midsByKey?.[sName] ||
         layout.mids.find(x => x.name === sName && (!gName || x.parent === gName));
-      for (const s of renderedSmalls) {
+      for (const s of edgeSmalls) {
         const parent = midLookup(s.parent, s.grandparent);
         if (!parent?.pos || !s.pos) continue;
         if (!renderedMidKey.has(`${parent.parent}/${parent.name}`)) continue;
@@ -4717,13 +4882,13 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
     // it, guaranteeing every attr shows a realistic cluster of
     // connections. A small per-big cap adds genre-level connections
     // for attrs that associate aggregated at that level.
-    if (layout.hasAttrs && renderedAttributes.length) {
+    if (layout.hasAttrs && edgeAttributes.length) {
       const ATTR_EDGE_CAP_MID = 15;  // was 8 — user wants denser pairing
       const BIG_ATTR_CAP      = 6;   // was 3 — same reason
       const emittedEdgeKey = new Set();
 
       if (layout.attrToMids) {
-        for (const a of renderedAttributes) {
+        for (const a of edgeAttributes) {
           if (!a.pos) continue;
           // Fetch up to 3× the cap so we have filler when some users are
           // hidden (due to bigs/mids filter state) — we only actually
@@ -4754,8 +4919,8 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
       // visible link to the big node even when they're already
       // connected to several of that big's mids.
       if (layout.bigAttrEdges) {
-        const attrByKey = new Map(renderedAttributes.map(a => [`${a.categoryId}:${a.name}`, a]));
-        for (const b of renderedBigs) {
+        const attrByKey = new Map(edgeAttributes.map(a => [`${a.categoryId}:${a.name}`, a]));
+        for (const b of edgeBigs) {
           const bAttrs = layout.bigAttrEdges(b) || [];
           let added = 0;
           for (const { node, cat } of bAttrs) {
@@ -4803,8 +4968,8 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
       // that happened to miss the mid-cap cutoff. Cap per-attr to 3
       // complements so the map doesn't turn into a web.
       if (layout.data) {
-        const renderedAttrByKey = new Map(renderedAttributes.map(a => [`${a.categoryId}:${a.name}`, a]));
-        for (const a of renderedAttributes) {
+        const renderedAttrByKey = new Map(edgeAttributes.map(a => [`${a.categoryId}:${a.name}`, a]));
+        for (const a of edgeAttributes) {
           if (!a.pos) continue;
           const cat = ATTR_CAT_BY_ID[a.categoryId];
           if (!cat?.complTable) continue;
@@ -4841,11 +5006,11 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
       }
 
       if (layout.bigAttrEdges) {
-        for (const a of renderedAttributes) {
+        for (const a of edgeAttributes) {
           const k = `${a.categoryId}:${a.name}`;
           if (attrHasEdge.has(k)) continue;
           if (!a.pos) continue;
-          for (const b of renderedBigs) {
+          for (const b of edgeBigs) {
             const bAttrs = layout.bigAttrEdges(b) || [];
             const hit = bAttrs.some(r => r.node?.categoryId === a.categoryId && r.node?.name === a.name);
             if (hit) {
@@ -4864,106 +5029,83 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
     }
 
     // ─ mid ↔ mid + small ↔ small PAIRING edges ───────────────────
-    // Until here every edge has been either tree (big→mid, mid→small)
-    // or attr-anchored (attr→mid, big→attr, attr↔attr). None of those
-    // directly say "these two mids are similar because they pair with
-    // the same things". For each mid we compute the overlap of its
-    // complement-attr set against every other mid's set, then draw
-    // edges to its top MID_PAIR_CAP overlaps. Two shared attrs is the
-    // minimum to qualify — less than that is noise.
-    //
-    // Smalls (microstyles, articulations) have no native complement
-    // table — they inherit their parent mid's pairing profile. Once
-    // we've decided mid A pairs well with mid B, we also connect a
-    // couple of A's smalls to B's smalls so the microstyle tier gets
-    // pairing lines too, not just the lone parent→micro tree edge.
-    //
-    // O(N²) in renderedMids, but N maxes out around 1k and the inner
-    // loop is a single Set.has call per attr, so the whole pass runs
-    // in a few ms on any realistic view. Guarded by hasAttrs because
-    // without complement data there's nothing to compare.
-    if (layout.hasAttrs && layout.midToAttrs && renderedMids.length > 1) {
-      const MID_PAIR_CAP    = 5;
-      const MIN_OVERLAP     = 2;
-      const SMALL_PAIR_CAP  = 2;   // pairs of similar-mids that seed small edges
-      const SMALLS_PER_PAIR = 2;   // smalls picked from each side of a pair
-      const midAttrSets = new Map();
-      for (const m of renderedMids) {
-        const attrs = layout.midToAttrs(m) || [];
-        const ks = new Set(attrs.map(({ node }) => `${node.categoryId}:${node.name}`));
-        if (ks.size > 0) midAttrSets.set(m, ks);
-      }
-      const pairsByMid = new Map();
-      for (const m of midAttrSets.keys()) pairsByMid.set(m, []);
+    // Reads from midPairCache (the O(N²) computation is hoisted above
+    // and cached against layout). This block now only emits edges —
+    // cheap filtering based on which tiers are rendered. See the
+    // midPairCache memo comment for why the overlap pass lives up
+    // there instead of here.
+    if (midPairCache) {
+      const MID_PAIR_CAP   = 5;
+      const pairsByMid     = midPairCache;
 
-      const midList = [...midAttrSets.keys()];
-      for (let i = 0; i < midList.length; i++) {
-        const a = midList[i];
-        const aSet = midAttrSets.get(a);
-        for (let j = i + 1; j < midList.length; j++) {
-          const b = midList[j];
-          const bSet = midAttrSets.get(b);
-          let shared = 0;
-          // Iterate the smaller set for speed.
-          const [src, dst] = aSet.size <= bSet.size ? [aSet, bSet] : [bSet, aSet];
-          for (const k of src) if (dst.has(k)) shared++;
-          if (shared >= MIN_OVERLAP) {
-            pairsByMid.get(a).push({ other: b, score: shared });
-            pairsByMid.get(b).push({ other: a, score: shared });
+      // mid↔mid — only emit when both endpoints are rendered mids.
+      if (edgeMids.length > 1) {
+        const emittedMidPair = new Set();
+        for (const [m, pairs] of pairsByMid) {
+          const mKey = `${m.parent}/${m.name}`;
+          if (!renderedMidKey.has(mKey)) continue;
+          let drawn = 0;
+          for (const p of pairs) {
+            if (drawn >= MID_PAIR_CAP) break;
+            const oKey = `${p.other.parent}/${p.other.name}`;
+            if (!renderedMidKey.has(oKey)) continue;
+            const ek = mKey < oKey ? `mm/${mKey}::${oKey}` : `mm/${oKey}::${mKey}`;
+            if (emittedMidPair.has(ek)) continue;
+            emittedMidPair.add(ek);
+            out.push({
+              from: m.pos, to: p.other.pos,
+              color: blendHex(m.color, p.other.color),
+              fromNode: { ...m, kind: "mid" },
+              toNode:   { ...p.other, kind: "mid" },
+            });
+            drawn++;
           }
         }
       }
 
-      // Sort each mid's pair list descending once — both the
-      // mid↔mid emit pass and the small↔small pass rely on it.
-      for (const pairs of pairsByMid.values()) pairs.sort((x, y) => y.score - x.score);
-
-      const emittedMidPair = new Set();
-      for (const [m, pairs] of pairsByMid) {
-        let drawn = 0;
-        for (const p of pairs) {
-          if (drawn >= MID_PAIR_CAP) break;
-          const k1 = `${m.parent}/${m.name}`;
-          const k2 = `${p.other.parent}/${p.other.name}`;
-          const ek = k1 < k2 ? `mm/${k1}::${k2}` : `mm/${k2}::${k1}`;
-          if (emittedMidPair.has(ek)) continue;
-          emittedMidPair.add(ek);
-          out.push({
-            from: m.pos, to: p.other.pos,
-            color: blendHex(m.color, p.other.color),
-            fromNode: { ...m, kind: "mid" },
-            toNode:   { ...p.other, kind: "mid" },
-          });
-          drawn++;
-        }
-      }
-
-      // small ↔ small — piggyback on the mid pairs we just computed.
-      // For each mid's top pairs, grab its smalls and the partner
-      // mid's smalls, connect a couple. Skips mids whose smalls aren't
-      // rendered (layer toggled off) or whose partner has no smalls.
-      if (layout.hasSmalls && renderedSmalls.length > 1) {
+      // small ↔ small — for EACH rendered small, emit edges to
+      // smalls from its parent mid's similar-mid neighbors. Previous
+      // iteration only linked the first two smalls of each mid to
+      // their partners, leaving ~60% of microstyles floating with
+      // no lines — user reported this. Now we build a partner pool
+      // (smalls from the top-K similar mids) and round-robin through
+      // it so every small gets EDGES_PER_SMALL connections.
+      if (layout.hasSmalls && edgeSmalls.length > 1) {
         const smallsByMidKey = new Map();
-        for (const s of renderedSmalls) {
+        for (const s of edgeSmalls) {
           const key = `${s.grandparent}/${s.parent}`;
           if (!smallsByMidKey.has(key)) smallsByMidKey.set(key, []);
           smallsByMidKey.get(key).push(s);
         }
+        const PARTNER_MIDS    = 4;  // K most-similar mids whose smalls become the partner pool
+        const EDGES_PER_SMALL = 2;  // edges emitted per rendered small
         const emittedSmallPair = new Set();
         for (const [m, pairs] of pairsByMid) {
           const mKey    = `${m.parent}/${m.name}`;
           const mSmalls = smallsByMidKey.get(mKey);
           if (!mSmalls || !mSmalls.length) continue;
-          let pairsUsed = 0;
+
+          // Partner pool: smalls from up to PARTNER_MIDS similar mids.
+          const partnerPool = [];
+          let partnersAdded = 0;
           for (const p of pairs) {
-            if (pairsUsed >= SMALL_PAIR_CAP) break;
+            if (partnersAdded >= PARTNER_MIDS) break;
             const oKey    = `${p.other.parent}/${p.other.name}`;
             const oSmalls = smallsByMidKey.get(oKey);
             if (!oSmalls || !oSmalls.length) continue;
-            const pick = Math.min(SMALLS_PER_PAIR, mSmalls.length, oSmalls.length);
-            for (let i = 0; i < pick; i++) {
-              const sa = mSmalls[i];
-              const sb = oSmalls[i];
+            for (const s of oSmalls) partnerPool.push(s);
+            partnersAdded++;
+          }
+          if (!partnerPool.length) continue;
+
+          // Round-robin through the pool so every small in mSmalls
+          // gets unique partners, not all pointing at the same node.
+          for (let si = 0; si < mSmalls.length; si++) {
+            const sa = mSmalls[si];
+            for (let ei = 0; ei < EDGES_PER_SMALL; ei++) {
+              const pi = (si * EDGES_PER_SMALL + ei) % partnerPool.length;
+              const sb = partnerPool[pi];
+              if (sa === sb) continue;
               const k1 = smallKey(sa);
               const k2 = smallKey(sb);
               const ek = k1 < k2 ? `ss/${k1}::${k2}` : `ss/${k2}::${k1}`;
@@ -4976,19 +5118,17 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
                 toNode:   { ...sb, kind: "small" },
               });
             }
-            pairsUsed++;
           }
         }
+      }
 
-        // small → attr — connect each rendered small to its top-N
-        // of its parent mid's attrs. Gives microstyles their own
-        // direct lines into the attribute cloud instead of only
-        // reaching it through their parent mid. Cap is tight (3)
-        // because every small under the same mid would otherwise
-        // emit the same fan.
+      // small → attr — connect each rendered small to its top-N of
+      // its parent mid's attrs. Requires attrs to be rendered (else
+      // no target to draw to) but does NOT require mids rendered.
+      if (layout.hasSmalls && edgeSmalls.length > 0 && edgeAttributes.length > 0) {
         const SMALL_ATTR_CAP = 3;
-        const renderedAttrByKey2 = new Map(renderedAttributes.map(a => [`${a.categoryId}:${a.name}`, a]));
-        for (const s of renderedSmalls) {
+        const renderedAttrByKey2 = new Map(edgeAttributes.map(a => [`${a.categoryId}:${a.name}`, a]));
+        for (const s of edgeSmalls) {
           if (!s.pos) continue;
           const parentMid = layout.midsByKey?.[s.parent + "/" + s.grandparent]
                        ||  layout.midsByKey?.[s.parent]
@@ -5014,7 +5154,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
     }
 
     return out;
-  }, [renderedBigs, renderedMids, renderedSmalls, renderedAttributes, layout]);
+  }, [edgeBigs, edgeMids, edgeSmalls, edgeAttributes, layout, midPairCache]);
 
   const selectBig   = b => setFocused({ kind: "big",       name: b.name, pos: b.pos });
   const selectMid   = s => setFocused({ kind: "mid",       name: s.name, parent: s.parent, pos: s.pos });
@@ -5096,6 +5236,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
     setFilters({ bigs: null, mids: null, smalls: null, attrCats: null, attrs: null });
     setSearch("");
     setLinesMode("on");
+    setRotateSpeed(2);   // Neural = wide panorama, faster turntable spin
     // Compute the furthest-from-origin rendered node and pull back far
     // enough that it fits within ~40% of the vertical viewport at the
     // default 50° FOV. Floor at 200 so tiny layouts (e.g. moods with
@@ -5131,6 +5272,8 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
   // of 0.3, so zoom-in is immediately available.
   const handleCenter = () => {
     setFocused(null);
+    setRotateSpeed(0.2);   // Dive in = inside the galaxy, slow contemplative spin
+    setLinesMode("auto");  // fresh dive-in state: connections auto (same default as on first enter)
     setCameraGoto(prev => ({ pos: [0, 0, 0], tgt: [0, 0, -1], n: prev.n + 1 }));
     setInteracting(true);
     if (interactionTimer.current) clearTimeout(interactionTimer.current);
@@ -5337,7 +5480,6 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
           />}
 
           <HoverTooltip hovered={hovered} focused={focused} livePosRef={livePosRef} />
-          <FocusHologram focused={focused} layout={layout} livePosRef={livePosRef} />
         </Suspense>
 
         <OrbitControls
@@ -5398,6 +5540,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
         canRandom={canRandomize}
       />
       <FocusHUD focused={focused} layout={layout} />
+      <FocusHologram focused={focused} layout={layout} />
       {copyToast && (
         <div
           key={copyToast.t}
