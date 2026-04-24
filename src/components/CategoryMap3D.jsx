@@ -2616,7 +2616,7 @@ const FocusHologram = React.memo(function FocusHologram({ focused, layout, liveP
         sprite
         center
         distanceFactor={8}
-        position={[0, 4, 0]}
+        position={[0, 6, 0]}
         zIndexRange={[200, 120]}
         pointerEvents="none"
         style={{ pointerEvents: "none" }}
@@ -2895,12 +2895,12 @@ function CameraRig({ focusTarget, cameraGoto, controlsRef, animatingRef, syncAni
     camera.up.set(0, 1, 0);
     const t = new THREE.Vector3(...p);
     destTgt.current.copy(t);
-    // Focus distance per kind, normalized so every kind lands at the
-    // same apparent star size on screen (radius/distance ≈ 0.0295 for
-    // all). Without this, e.g. a big would fill ~48 px radius while a
-    // small filled only ~36 px at the previous 2× distances, reading
-    // to the user as "zoom is more on some, less on others".
-    const dist = focusTarget.kind === "big" ? 44 : focusTarget.kind === "mid" ? 16 : focusTarget.kind === "small" ? 7 : 11;
+    // Focus distance per kind. Not strictly normalized on apparent
+    // size any more — that made smalls/attrs feel too close because
+    // their contextual neighbors (orbit siblings, same-category attrs)
+    // sit tight to them, while a big's context is galaxy-scale. Pulled
+    // back across the board, with extra breathing room on small/attr.
+    const dist = focusTarget.kind === "big" ? 50 : focusTarget.kind === "mid" ? 20 : focusTarget.kind === "small" ? 14 : 18;
     // Approach direction: prefer the side of the target the camera
     // is already on (continuity — no jarring teleport around the
     // galaxy). Fall back to radial-outward when the camera is
