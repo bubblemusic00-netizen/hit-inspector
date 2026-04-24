@@ -2440,18 +2440,36 @@ function computeFocusPairings(focused, layout) {
   return out;
 }
 
-// FocusHologram — info HUD that appears when exactly one element is
-// focused. Upper-left of the viewport, fixed position, no panel
-// backdrop, no chip boxes around pairings — just glowing neon text.
+// FocusHologram — info HUD anchored to the focused star in 3D space.
+// Floats beside-and-above the star so it tracks with camera view but
+// offsets so as not to cover the star itself. Visual read is laser /
+// neon text: transparent background, heavy text-shadow glow.
 //
-// Name types out via a ref + rAF loop writing directly to textContent
-// (zero React re-renders during the typing). Pairings and the caret
-// are plain CSS — the caret blinks via infinite keyframe, pairings
-// appear immediately once mounted. The previous staggered CSS reveal
-// was removed because scoped keyframe names plus remount-on-focus
-// was producing race conditions where items never un-hid on some
-// focus clicks, making the hologram look like it wasn't working.
-const FocusHologram = React.memo(function FocusHologram({ focused, layout }) {
+// Typing animation runs across ALL text (name + category headers +
+// items), not just the name. A single rAF loop walks chunks in order:
+//   kind → name (slow 38ms/char) → group0 header (fast 14ms) →
+//   group0 items (fast 10ms) → group1 ...
+// Each chunk writes directly to its span via ref — zero React
+// re-renders during the sequence. React.memo prevents parent
+// re-renders from propagating in.
+const FocusHologram = React.memo(function FocusHologram({ focused, layout, livePosRef }) {
+  const groupRef = useRef();
+
+  // Track the star's live world position every frame. Smalls orbit
+  // their parent mid, so their world position drifts; livePosRef is
+  // where SmallNodes writes the current transformed position.
+  useFrame(() => {
+    if (!focused || !groupRef.current) return;
+    let p = focused.pos;
+    if (livePosRef && focused.kind === "small" && focused.grandparent) {
+      const live = livePosRef.current.get(
+        focused.grandparent + "/" + focused.parent + "/" + focused.name
+      );
+      if (live) p = live;
+    }
+    if (p) groupRef.current.position.set(p[0], p[1], p[2]);
+  });
+
   const pairings = useMemo(
     () => computeFocusPairings(focused, layout),
     [focused, layout],
@@ -2459,144 +2477,188 @@ const FocusHologram = React.memo(function FocusHologram({ focused, layout }) {
 
   const targetName = focused ? (focused.label || focused.name || "") : "";
 
-  // Typing via direct DOM write. rAFs until all chars shown, then
-  // stops. Main thread untouched by React re-renders during fly-in.
-  const nameRef = useRef(null);
+  const kindTag =
+    focused?.kind === "attribute" ? "ATTR" :
+    focused?.kind === "small"     ? "MICRO" :
+    focused?.kind === "mid"       ? (layout.midLabel || "NODE").toUpperCase() :
+                                    (layout.bigLabel || "ROOT").split(" ")[0].toUpperCase();
+
+  // Build the sequence of text chunks to type, each with its own
+  // per-char delay. Name gets the slow cinematic delay; structural
+  // text (headers, item lists) types fast so the full reveal
+  // completes within ~2-4 seconds total even with many pairings.
+  const textChunks = useMemo(() => {
+    if (!focused) return [];
+    const out = [];
+    out.push({ key: 'kind', text: `◌ ${kindTag}`, delay: 14 });
+    out.push({ key: 'name', text: targetName, delay: 38 });
+    pairings.forEach((group, gi) => {
+      out.push({ key: `h${gi}`, text: `» ${group.label}`, delay: 14 });
+      // Join items with padded bullets — browser can break at spaces,
+      // which prevents mid-word overflow on long item lists.
+      out.push({ key: `i${gi}`, text: group.items.join('  ·  '), delay: 10 });
+    });
+    return out;
+  }, [focused, kindTag, targetName, pairings]);
+
+  // Refs for each chunk's target span. ref callbacks populate this
+  // on mount/update. The rAF loop writes textContent directly.
+  const chunkRefsRef = useRef({});
+
   useEffect(() => {
-    if (!nameRef.current) return;
-    const el = nameRef.current;
-    el.textContent = "";
-    if (!targetName) return;
-    let i = 0;
-    const DELAY = 38;
-    let last = performance.now();
-    let rafId = 0;
-    let stopped = false;
+    // Clear all chunk spans first so any previous focus's text is
+    // wiped before the new sequence starts.
+    for (const k in chunkRefsRef.current) {
+      const el = chunkRefsRef.current[k];
+      if (el) el.textContent = "";
+    }
+    if (!textChunks.length) return;
+
+    let chunkIdx = 0;
+    let charIdx  = 0;
+    let last     = performance.now();
+    let rafId    = 0;
+    let stopped  = false;
+
     const tick = (now) => {
       if (stopped) return;
-      if (now - last >= DELAY) {
-        i++;
-        if (el.isConnected) el.textContent = targetName.slice(0, i);
+      const chunk = textChunks[chunkIdx];
+      if (!chunk) return;
+      if (now - last >= chunk.delay) {
+        charIdx++;
+        const el = chunkRefsRef.current[chunk.key];
+        if (el && el.isConnected) {
+          el.textContent = chunk.text.slice(0, charIdx);
+        }
         last = now;
+        if (charIdx >= chunk.text.length) {
+          chunkIdx++;
+          charIdx = 0;
+          if (chunkIdx >= textChunks.length) {
+            return;  // done — stop rAF
+          }
+        }
       }
-      if (i < targetName.length) {
-        rafId = requestAnimationFrame(tick);
-      }
+      rafId = requestAnimationFrame(tick);
     };
     rafId = requestAnimationFrame(tick);
     return () => { stopped = true; if (rafId) cancelAnimationFrame(rafId); };
-  }, [targetName]);
+  }, [textChunks]);
 
-  if (!focused) return null;
+  if (!focused || !focused.pos) return null;
 
   const MATRIX = "#39ff41";
 
-  const kindTag =
-    focused.kind === "attribute" ? "ATTR" :
-    focused.kind === "small"     ? "MICRO" :
-    focused.kind === "mid"       ? (layout.midLabel || "NODE").toUpperCase() :
-                                   (layout.bigLabel || "ROOT").split(" ")[0].toUpperCase();
-
   return (
-    <div style={{
-      position: "absolute",
-      top: 170,
-      right: 24,
-      width: 310,
-      maxHeight: "calc(100vh - 220px)",
-      overflowY: "auto",
-      overflowX: "hidden",
-      pointerEvents: "none",
-      userSelect: "none",
-      color: MATRIX,
-      fontFamily: "ui-monospace, 'Geist Mono', 'SF Mono', Menlo, monospace",
-      zIndex: 22,
-    }}>
-      {/* Caret blink — pure CSS, no React state */}
-      <style>{`
-        @keyframes fh-caret-blink {
-          0%, 50%      { opacity: 1; }
-          50.01%, 100% { opacity: 0; }
-        }
-      `}</style>
-
-      {/* Kind tag */}
-      <div style={{
-        fontSize: 8.5, letterSpacing: "0.3em", fontWeight: 700,
-        opacity: 0.75,
-        textShadow: `0 0 4px ${MATRIX}`,
-        marginBottom: 4,
-      }}>
-        ◌ {kindTag}
-      </div>
-
-      {/* Name — typed via rAF into the empty span */}
-      <div style={{
-        fontSize: 20, fontWeight: 800, letterSpacing: "0.08em",
-        textTransform: "uppercase",
-        textShadow:
-          `0 0 6px ${MATRIX}, ` +
-          `0 0 16px rgba(57,255,65,0.7), ` +
-          `0 0 32px rgba(57,255,65,0.4)`,
-        minHeight: 26,
-        lineHeight: 1.2,
-        marginBottom: 14,
-        wordBreak: "break-word",
-      }}>
-        <span ref={nameRef} />
-        <span style={{
-          display: "inline-block",
-          width: 10, height: 18,
-          marginLeft: 3, marginBottom: -2,
-          background: MATRIX,
-          boxShadow: `0 0 8px ${MATRIX}`,
-          verticalAlign: "baseline",
-          animation: "fh-caret-blink 1.04s steps(1, end) infinite",
-        }} />
-      </div>
-
-      {/* Pairings — plain neon text, no chip boxes, separators soft */}
-      {pairings.length === 0 ? (
+    <group ref={groupRef}>
+      {/* Html without distanceFactor → text stays screen-space-sized.
+          Star can be near or far; HUD stays readable. center={false}
+          anchors the div's top-left at the projected screen point;
+          the inner transform then lifts and shifts it beside the
+          star so the star itself is not covered. */}
+      <Html center={false} zIndexRange={[200, 120]} style={{ pointerEvents: "none" }}>
         <div style={{
-          fontSize: 10, opacity: 0.55, letterSpacing: "0.18em",
-          textTransform: "uppercase",
-          textShadow: `0 0 4px ${MATRIX}`,
+          // Beside-and-above the star: 60px to the right, lifted up
+          // by most of the div's height so content sits above the
+          // anchor rather than draped over it.
+          transform: "translate(60px, -60%)",
+          position: "absolute",
+          width: 280,
+          color: MATRIX,
+          fontFamily: "ui-monospace, 'Geist Mono', 'SF Mono', Menlo, monospace",
+          userSelect: "none",
+          pointerEvents: "none",
+          // Force LTR — when the browser/system defaults to RTL (user
+          // on Hebrew system), the content flow flips and long lines
+          // render right-to-left, which reads as "cut off on the left"
+          // to the user because the overflow gets clipped on what
+          // would normally be the starting edge.
+          direction: "ltr",
+          textAlign: "left",
         }}>
-          » no pairings indexed
-        </div>
-      ) : (
-        <div>
-          {pairings.map(group => (
-            <div key={group.key} style={{ marginBottom: 10 }}>
-              <div style={{
-                fontSize: 9, letterSpacing: "0.26em",
-                opacity: 0.7, textTransform: "uppercase",
-                marginBottom: 4,
-                textShadow: `0 0 4px ${MATRIX}`,
-              }}>
-                » {group.label}
-              </div>
-              <div style={{
-                fontSize: 12,
-                lineHeight: 1.55,
-                textShadow:
-                  `0 0 4px rgba(57,255,65,0.7), ` +
-                  `0 0 12px rgba(57,255,65,0.35)`,
-              }}>
-                {group.items.map((item, idx) => (
-                  <span key={item}>
-                    {idx > 0 && (
-                      <span style={{ opacity: 0.35, margin: "0 6px" }}>·</span>
-                    )}
-                    {item}
-                  </span>
-                ))}
-              </div>
+          <style>{`
+            @keyframes fh-caret-blink {
+              0%, 50%      { opacity: 1; }
+              50.01%, 100% { opacity: 0; }
+            }
+          `}</style>
+
+          {/* Kind tag — types in first */}
+          <div style={{
+            fontSize: 9, letterSpacing: "0.3em", fontWeight: 700,
+            opacity: 0.75,
+            textShadow: `0 0 4px ${MATRIX}`,
+            marginBottom: 4,
+            minHeight: 13,
+          }}>
+            <span ref={el => { chunkRefsRef.current['kind'] = el; }} />
+          </div>
+
+          {/* Name + caret */}
+          <div style={{
+            fontSize: 20, fontWeight: 800, letterSpacing: "0.08em",
+            textTransform: "uppercase",
+            textShadow:
+              `0 0 6px ${MATRIX}, ` +
+              `0 0 16px rgba(57,255,65,0.7), ` +
+              `0 0 32px rgba(57,255,65,0.4)`,
+            minHeight: 26,
+            lineHeight: 1.2,
+            marginBottom: 12,
+            wordBreak: "break-word",
+          }}>
+            <span ref={el => { chunkRefsRef.current['name'] = el; }} />
+            <span style={{
+              display: "inline-block",
+              width: 10, height: 18,
+              marginLeft: 3, marginBottom: -2,
+              background: MATRIX,
+              boxShadow: `0 0 8px ${MATRIX}`,
+              verticalAlign: "baseline",
+              animation: "fh-caret-blink 1.04s steps(1, end) infinite",
+            }} />
+          </div>
+
+          {/* Pairings */}
+          {pairings.length === 0 ? (
+            <div style={{
+              fontSize: 10, opacity: 0.55, letterSpacing: "0.18em",
+              textTransform: "uppercase",
+              textShadow: `0 0 4px ${MATRIX}`,
+            }}>
+              » no pairings indexed
             </div>
-          ))}
+          ) : (
+            <div>
+              {pairings.map((group, gi) => (
+                <div key={group.key} style={{ marginBottom: 9 }}>
+                  <div style={{
+                    fontSize: 9, letterSpacing: "0.26em",
+                    opacity: 0.72, textTransform: "uppercase",
+                    marginBottom: 3,
+                    textShadow: `0 0 4px ${MATRIX}`,
+                    minHeight: 13,
+                  }}>
+                    <span ref={el => { chunkRefsRef.current[`h${gi}`] = el; }} />
+                  </div>
+                  <div style={{
+                    fontSize: 12,
+                    lineHeight: 1.5,
+                    wordBreak: "break-word",
+                    textShadow:
+                      `0 0 4px rgba(57,255,65,0.7), ` +
+                      `0 0 12px rgba(57,255,65,0.35)`,
+                    minHeight: 18,
+                  }}>
+                    <span ref={el => { chunkRefsRef.current[`i${gi}`] = el; }} />
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
-      )}
-    </div>
+      </Html>
+    </group>
   );
 });
 
@@ -2728,11 +2790,10 @@ function CameraRig({ focusTarget, cameraGoto, controlsRef, animatingRef, syncAni
     const travelDist = camera.position.distanceTo(destPos.current);
     // Duration floor keeps short hops readable (otherwise a 5-unit
     // small-to-small switch completes in two frames); ceiling keeps
-    // long Neural trips from feeling endless. Range widened from
-    // 0.6-1.6s → 0.9-2.2s so the two-phase easing has room to
-    // breathe: rotate phase gets ~0.45s min, approach phase ~0.5s
-    // min, which reads as unhurried flow.
-    anim.current.duration = Math.max(0.9, Math.min(2.2, 0.8 + travelDist / 85));
+    // long Neural trips from feeling endless. Range 1.0-2.5s so the
+    // two-phase easing has room to breathe: rotate phase gets ~0.5s
+    // min, approach phase ~0.55s min, which reads as unhurried flow.
+    anim.current.duration = Math.max(1.0, Math.min(2.5, 0.9 + travelDist / 80));
 
     // Control point for quadratic Bezier: midpoint pushed outward
     // from the galaxy center by a fraction of travel distance. The
@@ -2859,7 +2920,19 @@ function CameraRig({ focusTarget, cameraGoto, controlsRef, animatingRef, syncAni
       );
       if (controlsRef.current) {
         controlsRef.current.target.lerpVectors(anim.current.startTgt, endTgt, easeTgt);
-        controlsRef.current.update();
+        // Manual lookAt instead of controls.update() — critical when
+        // coming from free-flight / FPS-drag state where controls.target
+        // sits somewhere arbitrary. Every call to controls.update()
+        // re-derives its internal spherical from (position - target)
+        // and re-applies damping + any residual sphericalDelta. When
+        // target has just swung a huge distance toward the focused
+        // star, that re-derivation fights our Bezier position each
+        // frame — reads as the camera jumping / launching. Skipping
+        // update() here makes the animation fully owned by this
+        // useFrame; OC state is re-synced with a single update() at
+        // T >= 1 below. Non-issue for normal focus-to-focus clicks
+        // because target barely moves and the conflict is negligible.
+        camera.lookAt(controlsRef.current.target);
       }
 
       if (T >= 1) {
@@ -2909,14 +2982,17 @@ function CameraRig({ focusTarget, cameraGoto, controlsRef, animatingRef, syncAni
 //     when zoomed out across the whole map.
 //   - Shift doubles speed (boost) for crossing long stretches fast.
 //
-// Key axes from camera.matrixWorld (column 0 = right, column 2 negated =
-// forward) instead of hand-computed cross products — robust at any
-// pitch, including looking straight up/down where the naive
-// forward × world-up approach degenerates.
+// Key axes from camera.matrixWorld (column 0 = right, column 1 = up,
+// column 2 negated = forward) instead of hand-computed cross products —
+// robust at any pitch, including looking straight up/down where the
+// naive forward × world-up approach degenerates.
 //
-// W/A/S/D are camera-relative (go where you're looking); Z/X are
-// world-axis (always straight down/up) because "elevate vertically"
-// is the intuitive read of those keys even when looking down.
+// All six keys are fully camera-relative (spaceflight feel): W is
+// genuinely where you're pointed (pitch included), X raises you
+// relative to your head, not world-up. Means you can pitch into the
+// galaxy and W dives you in; X lifts you above your current view.
+// If you want world-axis vertical at any rotation, roll the camera
+// back to level first with the mouse.
 //
 // Any keypress cancels a pending focus-lerp so keyboard always wins
 // over a fly-to-focus animation in progress.
@@ -2924,6 +3000,7 @@ function FreeFlightNav({ controlsRef, keysDownRef, syncAnimating, releaseFollow 
   const { camera } = useThree();
   const forward  = useMemo(() => new THREE.Vector3(), []);
   const rightV   = useMemo(() => new THREE.Vector3(), []);
+  const upV      = useMemo(() => new THREE.Vector3(), []);
   const desired  = useMemo(() => new THREE.Vector3(), []);
   const velocity = useMemo(() => new THREE.Vector3(), []);
   const deltaPos = useMemo(() => new THREE.Vector3(), []);
@@ -2943,24 +3020,27 @@ function FreeFlightNav({ controlsRef, keysDownRef, syncAnimating, releaseFollow 
 
     desired.set(0, 0, 0);
     if (hasInput) {
-      // Camera-relative axes from matrixWorld — correct at every pitch
-      // including straight-down where cross(forward, up) degenerates.
+      // All six axes are FULLY camera-relative — drawn from the
+      // camera's matrixWorld columns directly, no flattening. "Forward"
+      // is genuinely where the camera is pointed (pitch included),
+      // "right" is its true right, and "up" is its local up. This is
+      // the game-FPS feel the user asked for: if you look up and
+      // press W, you actually fly up along your view; X raises you
+      // relative to your head, not relative to world-up.
+      //
+      // matrixWorld columns: col 0 = right, col 1 = up, col 2 = back.
+      // Camera rotation matrix is orthonormal with uniform scale,
+      // so the columns are already unit vectors — no normalize needed.
       forward.setFromMatrixColumn(camera.matrixWorld, 2).negate();
-      rightV.setFromMatrixColumn(camera.matrixWorld, 0);
-      // Flatten W/S/A/D onto the horizontal plane. Without this, tilting
-      // the camera down makes W dive through the floor — which is the
-      // "uncomfortable with WASD" feel the user reported when combining
-      // mouse-drag pitch with keyboard flight. Vertical is reserved for
-      // the dedicated X / Z keys, which remain world-up / world-down.
-      forward.y = 0; if (forward.lengthSq() > 1e-6) forward.normalize();
-      rightV.y  = 0; if (rightV.lengthSq()  > 1e-6) rightV.normalize();
+      rightV .setFromMatrixColumn(camera.matrixWorld, 0);
+      upV    .setFromMatrixColumn(camera.matrixWorld, 1);
 
       if (keys.has("w")) desired.add(forward);
       if (keys.has("s")) desired.sub(forward);
       if (keys.has("d")) desired.add(rightV);
       if (keys.has("a")) desired.sub(rightV);
-      if (keys.has("x")) desired.y += 1;
-      if (keys.has("z")) desired.y -= 1;
+      if (keys.has("x")) desired.add(upV);
+      if (keys.has("z")) desired.sub(upV);
 
       if (desired.lengthSq() > 0) {
         desired.normalize();
@@ -3208,16 +3288,27 @@ function Toggle({ on, onChange, label, color, disabled }) {
   );
 }
 
-function Slider({ value, onChange, min = 0, max = 100, step = 1, label, formatValue, disabled }) {
+function Slider({ value, onChange, min = 0, max = 100, step = 1, label, formatValue, disabled, neon = false }) {
   const display = formatValue ? formatValue(value) : String(value);
+  const MATRIX = "#39ff41";
   return (
     <div style={{ padding: "5px 10px 3px", opacity: disabled ? 0.35 : 1 }}>
       <div style={{
         display: "flex", justifyContent: "space-between", alignItems: "baseline",
         fontSize: 10, fontFamily: T.fontMono, marginBottom: 3,
       }}>
-        <span style={{ color: T.textMuted, letterSpacing: ".04em" }}>{label}</span>
-        <span style={{ color: T.text, fontSize: 9, fontVariantNumeric: "tabular-nums" }}>{display}</span>
+        <span style={{
+          color: neon ? MATRIX : T.textMuted,
+          letterSpacing: ".04em",
+          textShadow: neon ? `0 0 4px ${MATRIX}, 0 0 9px rgba(57,255,65,0.5)` : "none",
+          fontWeight: neon ? 700 : 400,
+        }}>{label}</span>
+        <span style={{
+          color: neon ? MATRIX : T.text,
+          fontSize: 9, fontVariantNumeric: "tabular-nums",
+          textShadow: neon ? `0 0 4px ${MATRIX}, 0 0 8px rgba(57,255,65,0.6)` : "none",
+          fontWeight: neon ? 700 : 400,
+        }}>{display}</span>
       </div>
       <input
         type="range"
@@ -3226,7 +3317,9 @@ function Slider({ value, onChange, min = 0, max = 100, step = 1, label, formatVa
         disabled={disabled}
         style={{
           width: "100%", cursor: disabled ? "default" : "pointer",
-          accentColor: T.accent, display: "block", margin: 0,
+          accentColor: neon ? MATRIX : T.accent,
+          display: "block", margin: 0,
+          filter: neon ? `drop-shadow(0 0 4px rgba(57,255,65,0.55))` : "none",
         }}
       />
     </div>
@@ -4008,18 +4101,18 @@ function LayerPanel({
           {linesMode !== "off" && (
             <Slider label="Focus edges" value={lineOpacity}
               min={0} max={1} step={0.05} formatValue={pctFmt}
-              onChange={setLineOpacity} />
+              onChange={setLineOpacity} neon />
           )}
           {linesMode === "on" && (
             <Slider label="All edges" value={allLinesOpacity}
               min={0} max={1} step={0.02} formatValue={pctFmt}
-              onChange={setAllLinesOpacity} />
+              onChange={setAllLinesOpacity} neon />
           )}
 
           <SectionLabel>rotation</SectionLabel>
           <Slider label="Speed" value={rotateSpeed}
             min={0.05} max={2} step={0.05} formatValue={multFmt}
-            onChange={setRotateSpeed} />
+            onChange={setRotateSpeed} neon />
 
           <div style={{
             marginTop: 12, padding: "8px 10px", borderTop: `1px solid ${T.borderHi}`,
@@ -5501,6 +5594,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
           />}
 
           <HoverTooltip hovered={hovered} focused={focused} livePosRef={livePosRef} />
+          <FocusHologram focused={focused} layout={layout} livePosRef={livePosRef} />
         </Suspense>
 
         <OrbitControls
@@ -5561,7 +5655,6 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
         canRandom={canRandomize}
       />
       <FocusHUD focused={focused} layout={layout} />
-      <FocusHologram focused={focused} layout={layout} />
       {copyToast && (
         <div
           key={copyToast.t}
