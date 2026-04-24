@@ -2623,7 +2623,7 @@ const FocusHologram = React.memo(function FocusHologram({ focused, layout, liveP
       >
         <div style={{
           width: 480,
-          maxHeight: 240,
+          maxHeight: 340,
           overflow: "hidden",
           color: MATRIX,
           fontFamily: "ui-monospace, 'Geist Mono', 'SF Mono', Menlo, monospace",
@@ -2895,12 +2895,10 @@ function CameraRig({ focusTarget, cameraGoto, controlsRef, animatingRef, syncAni
     camera.up.set(0, 1, 0);
     const t = new THREE.Vector3(...p);
     destTgt.current.copy(t);
-    // Focus distance per kind. Not strictly normalized on apparent
-    // size any more — that made smalls/attrs feel too close because
-    // their contextual neighbors (orbit siblings, same-category attrs)
-    // sit tight to them, while a big's context is galaxy-scale. Pulled
-    // back across the board, with extra breathing room on small/attr.
-    const dist = focusTarget.kind === "big" ? 50 : focusTarget.kind === "mid" ? 20 : focusTarget.kind === "small" ? 14 : 18;
+    // Focus distance per kind. Per-kind tuning after user feedback:
+    // big was too far (pulled 50% closer), mid stays good, small/attr
+    // were too close (pulled back).
+    const dist = focusTarget.kind === "big" ? 25 : focusTarget.kind === "mid" ? 20 : focusTarget.kind === "small" ? 18 : 22;
     // Approach direction: prefer the side of the target the camera
     // is already on (continuity — no jarring teleport around the
     // galaxy). Fall back to radial-outward when the camera is
@@ -3187,13 +3185,15 @@ function FpsDragView({ controlsRef, releaseFollow, syncAnimating, onInteractingC
     const el = gl.domElement;
     if (!el) return;
 
-    // Scratch vectors/spherical reused per pointer event — orbit mode
-    // runs every move, allocating a Spherical per tick showed up in
+    // Scratch vectors/quaternions reused per pointer event — onMove
+    // runs per mouse sample, allocating on every tick showed up in
     // profiler as measurable GC pressure.
-    const forward = new THREE.Vector3();
-    const localUp = new THREE.Vector3();
+    const forward     = new THREE.Vector3();
     const orbitOffset = new THREE.Vector3();
-    const orbitSpherical = new THREE.Spherical();
+    const scratchVec1 = new THREE.Vector3();
+    const scratchVec2 = new THREE.Vector3();
+    const scratchQuat1 = new THREE.Quaternion();
+    const scratchQuat2 = new THREE.Quaternion();
 
     const onDown = (e) => {
       // Left button only — middle (wheel dolly) and right (nothing)
@@ -3230,41 +3230,34 @@ function FpsDragView({ controlsRef, releaseFollow, syncAnimating, onInteractingC
 
       const focused = focusedRef?.current;
 
+      // Both modes share the same 6-DoF rotation primitive: rotate
+      // around the camera's LOCAL up and right axes. This avoids the
+      // two failure modes the earlier code had:
+      //   - Euler YXZ in FPS mode inverted mouse direction past ±90°
+      //     pitch because the YXZ decomposition is ambiguous there.
+      //   - Spherical coords in orbit mode couldn't cross the poles
+      //     (theta indeterminate), so vertical drag hit a wall.
+      // Local-axis quaternion rotations have neither of those problems.
+      // Trade-off: accumulated roll if the user zig-zags a lot, which
+      // is self-correcting via Recenter and acceptable for the app.
+      scratchVec1.set(0, 1, 0).applyQuaternion(camera.quaternion);  // local up (world coords)
+      scratchVec2.set(1, 0, 0).applyQuaternion(camera.quaternion);  // local right (world coords)
+      scratchQuat1.setFromAxisAngle(scratchVec1, -dx * SENS);        // yaw
+      scratchQuat2.setFromAxisAngle(scratchVec2, -dy * SENS);        // pitch
+
       if (focused?.pos) {
         // ── Orbit mode ──────────────────────────────────────────────
-        // Camera pivots around controls.target (the focused star).
-        // CameraRig has already lerped target onto the star and, if
-        // it's a moving small, keeps it on the live position every
-        // frame — we just rotate our offset around it.
+        // Rotate both the target-to-camera offset AND the camera's
+        // orientation by the same yaw+pitch. Keeps the camera framed
+        // on the star through any tilt — including straight up/down
+        // and all the way over the top.
         orbitOffset.copy(camera.position).sub(controls.target);
-        const r = orbitOffset.length();
-        if (r < 0.01) return;  // degenerate — can't orbit a zero radius
-        orbitSpherical.setFromVector3(orbitOffset);
-        orbitSpherical.theta -= dx * SENS;
-        // Full vertical freedom. Only a 0.005 rad epsilon keeps phi
-        // off the exact pole — spherical coords are singular there
-        // (theta becomes indeterminate). Everywhere else, pitch is
-        // unclamped. Previous 0.16 rad (9°) clamp was stopping the
-        // user from looking straight up or down; the derived camera.up
-        // below means lookAt stays well-defined near the poles.
-        const POLE_EPS = 0.005;
-        orbitSpherical.phi = Math.max(
-          POLE_EPS,
-          Math.min(Math.PI - POLE_EPS, orbitSpherical.phi - dy * SENS),
-        );
-        orbitOffset.setFromSpherical(orbitSpherical);
+        if (orbitOffset.lengthSq() < 1e-4) return;  // degenerate — at the target
+        orbitOffset.applyQuaternion(scratchQuat1).applyQuaternion(scratchQuat2);
+        camera.quaternion.premultiply(scratchQuat1).premultiply(scratchQuat2);
         camera.position.copy(controls.target).add(orbitOffset);
-        // Derived up: lookAt needs up not parallel to forward. Standard
-        // (0,1,0) degenerates when the camera is nearly above or below
-        // the target. This formula gives world-Y at the equator and
-        // smoothly transitions to the polar-circle tangent at the
-        // poles, so the orientation is stable all the way through.
-        camera.up.set(
-          -Math.cos(orbitSpherical.phi) * Math.sin(orbitSpherical.theta),
-           Math.sin(orbitSpherical.phi),
-          -Math.cos(orbitSpherical.phi) * Math.cos(orbitSpherical.theta),
-        );
-        camera.lookAt(controls.target);
+        camera.up.set(0, 1, 0).applyQuaternion(camera.quaternion);
+        camera.updateMatrixWorld();
         // Keep Euler in sync so a subsequent unfocused FPS drag (user
         // clicks Exit Focus mid-session) doesn't jump on first move.
         eulerRef.current.setFromQuaternion(camera.quaternion, "YXZ");
@@ -3272,21 +3265,17 @@ function FpsDragView({ controlsRef, releaseFollow, syncAnimating, onInteractingC
       }
 
       // ── FPS mode ──────────────────────────────────────────────────
-      // Yaw on .y, pitch on .x — both accumulate freely (no clamp).
-      // The old code clamped pitch just shy of ±90° because past that
-      // OrbitControls.update()'s per-frame camera.lookAt(target) used
-      // world-up and "corrected" the camera back to upright every
-      // frame, reading as a tumble. Fix: sync camera.up to the
-      // camera's own local up after each drag step — lookAt then
-      // preserves whatever orientation the user dragged to, including
-      // fully inverted views. Rolling past the zenith / nadir feels
-      // natural, like a spaceship camera.
-      eulerRef.current.y -= dx * SENS;
-      eulerRef.current.x -= dy * SENS;
-      camera.quaternion.setFromEuler(eulerRef.current);
-      localUp.set(0, 1, 0).applyQuaternion(camera.quaternion);
-      camera.up.copy(localUp);
+      // Same primitive: rotate the camera's quaternion in place. No
+      // translation — this is a look-around, not an orbit. Target is
+      // re-anchored below so wheel-dolly and autoRotate keep a sensible
+      // pivot after the drag.
+      camera.quaternion.premultiply(scratchQuat1).premultiply(scratchQuat2);
+      camera.up.set(0, 1, 0).applyQuaternion(camera.quaternion);
       camera.updateMatrixWorld();
+      // Keep eulerRef roughly synced — mostly for legacy code paths.
+      // With quaternion-based rotation, Euler YXZ isn't the source of
+      // truth any more; the quaternion on the camera is.
+      eulerRef.current.setFromQuaternion(camera.quaternion, "YXZ");
 
       // Re-anchor target to the point directly in front of the
       // camera at its previous distance. Keeps wheel-dolly speed
@@ -4511,14 +4500,21 @@ function MapToolbar({ autoRotate, onToggleAutoRotate, onCenter, onNeural, hasFoc
   return (
     <div style={{
       position: "absolute", bottom: 20, left: "50%", transform: "translateX(-50%)",
-      display: "flex", gap: 12, alignItems: "center", zIndex: 10,
+      display: "flex", flexDirection: "column", gap: 10,
+      alignItems: "center", zIndex: 10,
     }}>
-      {hasFocus && <ExitFocusButton onExit={onExitFocus} />}
-      {hasFocus && <RecenterButton onRecenter={onRecenter} />}
-      <CenterButton onCenter={onCenter} />
-      <RandomButton onRandom={onRandom} disabled={!canRandom} />
-      <AutoRotateButton on={autoRotate} onToggle={onToggleAutoRotate} />
-      <NeuralButton onNeural={onNeural} />
+      {hasFocus && (
+        <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+          <ExitFocusButton onExit={onExitFocus} />
+          <RecenterButton onRecenter={onRecenter} />
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+        <CenterButton onCenter={onCenter} />
+        <RandomButton onRandom={onRandom} disabled={!canRandom} />
+        <AutoRotateButton on={autoRotate} onToggle={onToggleAutoRotate} />
+        <NeuralButton onNeural={onNeural} />
+      </div>
     </div>
   );
 }
