@@ -3170,10 +3170,10 @@ function LayerPanel({
           <Toggle on={layers.bigs} label={`${layout.bigLabel} (big)`} color="#A78BFA"
             onChange={v => setLayers(l => ({ ...l, bigs: v }))} />
           <Toggle on={layers.mids} label={`${layout.midLabel} (mid)`} color="#60A5FA"
-            onChange={v => setLayers(l => ({ ...l, mids: v, smalls: !v ? false : l.smalls }))} />
+            onChange={v => setLayers(l => ({ ...l, mids: v }))} />
           {layout.hasSmalls && (
             <Toggle on={layers.smalls} label={`${layout.smallLabel} (small)`} color="#F472B6"
-              disabled={!layers.mids} onChange={v => setLayers(l => ({ ...l, smalls: v }))} />
+              onChange={v => setLayers(l => ({ ...l, smalls: v }))} />
           )}
           {layout.hasAttrs && (
             <Toggle on={layers.attributes} label="Attributes cloud" color="#2DD4BF"
@@ -3259,21 +3259,25 @@ function LayerPanel({
             onQuery={setBigQuery}
           />
 
-          {layers.mids && (
-            <>
-              <SectionLabel>{layout.midLabel.toLowerCase()}s</SectionLabel>
-              <MultiSelectList
-                items={midItems}
-                selected={filters.mids}
-                onChange={setMidsFilter}
-                maxHeight={160}
-                query={midQuery}
-                onQuery={setMidQuery}
-              />
-            </>
-          )}
+          {/* Mid / small / attribute filter lists are always visible here.
+              A picked filter activates an explicit own-tier constraint in
+              visibleMids / visibleSmalls / visibleAttributes — which means
+              the pick takes effect regardless of whether the parent tier
+              is filtered or the layer is toggled on. Users complained that
+              gating these lists behind `layers.mids` / `layers.smalls` hid
+              them when they wanted to narrow the view without flipping
+              layer toggles first. */}
+          <SectionLabel>{layout.midLabel.toLowerCase()}s</SectionLabel>
+          <MultiSelectList
+            items={midItems}
+            selected={filters.mids}
+            onChange={setMidsFilter}
+            maxHeight={160}
+            query={midQuery}
+            onQuery={setMidQuery}
+          />
 
-          {layout.hasSmalls && layers.smalls && (
+          {layout.hasSmalls && (
             <>
               <SectionLabel>{layout.smallLabel.toLowerCase()}s</SectionLabel>
               <MultiSelectList
@@ -3287,7 +3291,7 @@ function LayerPanel({
             </>
           )}
 
-          {layout.hasAttrs && layers.attributes && (
+          {layout.hasAttrs && (
             <>
               <SectionLabel>attributes</SectionLabel>
               <MultiSelectList
@@ -3662,7 +3666,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
   const [hoveredEdgeIdx, setHoveredEdgeIdx] = useState(-1);      // index into focus-lines
   const [hoveredAllEdgeIdx, setHoveredAllEdgeIdx] = useState(-1); // index into allEdges
   const [linesMode, setLinesMode] = useState("auto");   // "off" | "auto" | "on"
-  const [autoRotate, setAutoRotate] = useState(true);
+  const [autoRotate, setAutoRotate] = useState(false);
   const [interacting, setInteracting] = useState(false);
   const [resetCount, setResetCount] = useState(0);
 
@@ -3685,9 +3689,9 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
     small: "auto",  // microstyles
     attr:  "auto",  // attributes
   });
-  const [lineOpacity, setLineOpacity] = useState(1.0);   // 0 = invisible, 1 = full
+  const [lineOpacity, setLineOpacity] = useState(0.5);   // 0 = invisible, 1 = full
   const [allLinesOpacity, setAllLinesOpacity] = useState(0.08); // base for "on" mode
-  const [rotateSpeed, setRotateSpeed] = useState(0.18);  // very slow — full rotation ~5 min
+  const [rotateSpeed, setRotateSpeed] = useState(0.08);  // very slow — full rotation ~10 min
   const [bgStars, setBgStars] = useState({ on: true, count: 2000, speed: 0.2 });
 
   const controlsRef = useRef();
@@ -3760,6 +3764,16 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
     // Shift has other meanings in the UI (Shift+click, etc.) — don't
     // preventDefault on it. The movement keys are safe to preventDefault.
     if (mapped !== "shift") e.preventDefault();
+    // Same interaction flag drag uses — pauses autoRotate while the
+    // user is actively flying. Without this the camera tries to orbit
+    // controls.target at the same time WASD is dragging both camera
+    // and target through space, which is the "weird big rotation" the
+    // user complained about. Timer resets every keystroke.
+    if (mapped !== "shift") {
+      setInteracting(true);
+      if (interactionTimer.current) clearTimeout(interactionTimer.current);
+      interactionTimer.current = setTimeout(() => setInteracting(false), 1500);
+    }
   };
   const flightKeyUp = (e) => {
     const mapped = CODE_TO_KEY_MAP[e.code];
@@ -4286,18 +4300,28 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
   const selectSmall = m => setFocused({ kind: "small",     name: m.name, parent: m.parent, grandparent: m.grandparent, pos: m.pos });
   const selectAttr  = a => setFocused({ kind: "attribute", name: a.name, label: a.label, categoryId: a.categoryId, pos: a.pos });
 
-  // Random teleport — flat uniform pick across every rendered node. Using
-  // the rendered arrays (not the raw layout) means layer toggles, filters,
-  // and focus overrides all naturally restrict the pool to what the user
-  // actually sees right now. A few retries avoid landing on the star
-  // you're already focused on; if every retry still hits it (pool size 1)
-  // we re-fire setFocused with a fresh object to re-engage the follow.
+  // Random teleport — flat uniform pick across what's on screen. If the
+  // rendered pool is empty (e.g. every layer toggled off and nothing
+  // focused), fall back to the full layout so the button still does
+  // something useful instead of being a dead input. A few retries skip
+  // the currently-focused node so re-pressing feels like a teleport,
+  // not a refresh.
   const handleRandomize = () => {
+    const push = (arr, kind, list) => {
+      for (const n of list) arr.push({ kind, node: n });
+    };
     const pool = [];
-    for (const b of renderedBigs)        pool.push({ kind: "big",       node: b });
-    for (const m of renderedMids)        pool.push({ kind: "mid",       node: m });
-    for (const s of renderedSmalls)      pool.push({ kind: "small",     node: s });
-    for (const a of renderedAttributes)  pool.push({ kind: "attribute", node: a });
+    push(pool, "big",       renderedBigs);
+    push(pool, "mid",       renderedMids);
+    push(pool, "small",     renderedSmalls);
+    push(pool, "attribute", renderedAttributes);
+    // Fallback: no layers active → use everything the layout has.
+    if (pool.length === 0) {
+      push(pool, "big",       layout.bigs || []);
+      push(pool, "mid",       layout.mids || []);
+      if (layout.hasSmalls) push(pool, "small",     layout.smalls || []);
+      if (layout.hasAttrs)  push(pool, "attribute", layout.attributes || []);
+    }
     if (pool.length === 0) return;
     const isSameAsFocused = (item) => {
       if (!focused) return false;
@@ -4308,18 +4332,21 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
       return true;
     };
     let pick = pool[Math.floor(Math.random() * pool.length)];
-    for (let i = 0; i < 5 && isSameAsFocused(pick); i++) {
+    for (let i = 0; i < 8 && isSameAsFocused(pick); i++) {
       pick = pool[Math.floor(Math.random() * pool.length)];
     }
+    // If we still hit the same focus, re-fire setFocused with a fresh
+    // object so CameraRig's useEffect runs again and re-engages follow.
     if (pick.kind === "big")            selectBig(pick.node);
     else if (pick.kind === "mid")       selectMid(pick.node);
     else if (pick.kind === "small")     selectSmall(pick.node);
     else if (pick.kind === "attribute") selectAttr(pick.node);
   };
 
-  const canRandomize =
-    renderedBigs.length + renderedMids.length +
-    renderedSmalls.length + renderedAttributes.length > 0;
+  // Always enabled — the fallback above guarantees a valid destination
+  // whenever the layout itself has nodes. If the layout is completely
+  // empty the click just no-ops, which is acceptable.
+  const canRandomize = true;
 
   // Edge click — go to the OTHER endpoint if we're focused on one side,
   // otherwise (general view) pick one at random. Keeps navigation fluid.
@@ -4359,7 +4386,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
   const handleResetCustomization = () => {
     setNodeSizes({ big: 1.0, mid: 1.0, small: 1.0, attr: 1.0 });
     setLabelOpts({ big: "on", mid: "auto", small: "auto", attr: "auto" });
-    setLineOpacity(1.0);
+    setLineOpacity(0.5);
     setAllLinesOpacity(0.08);
     setRotateSpeed(0.18);
     setBgStars({ on: true, count: 2000, speed: 0.2 });
