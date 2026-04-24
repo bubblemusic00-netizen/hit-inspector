@@ -2501,7 +2501,7 @@ const FocusHologram = React.memo(function FocusHologram({ focused, layout }) {
     <div style={{
       position: "absolute",
       top: 170,
-      left: 24,
+      right: 24,
       width: 310,
       maxHeight: "calc(100vh - 220px)",
       overflowY: "auto",
@@ -2728,8 +2728,11 @@ function CameraRig({ focusTarget, cameraGoto, controlsRef, animatingRef, syncAni
     const travelDist = camera.position.distanceTo(destPos.current);
     // Duration floor keeps short hops readable (otherwise a 5-unit
     // small-to-small switch completes in two frames); ceiling keeps
-    // long Neural trips from feeling sluggish. Linear 0.6 → 1.6s.
-    anim.current.duration = Math.max(0.6, Math.min(1.6, 0.55 + travelDist / 100));
+    // long Neural trips from feeling endless. Range widened from
+    // 0.6-1.6s → 0.9-2.2s so the two-phase easing has room to
+    // breathe: rotate phase gets ~0.45s min, approach phase ~0.5s
+    // min, which reads as unhurried flow.
+    anim.current.duration = Math.max(0.9, Math.min(2.2, 0.8 + travelDist / 85));
 
     // Control point for quadratic Bezier: midpoint pushed outward
     // from the galaxy center by a fraction of travel distance. The
@@ -2806,16 +2809,34 @@ function CameraRig({ focusTarget, cameraGoto, controlsRef, animatingRef, syncAni
       anim.current.t += dtSafe;
       const T = Math.min(1, anim.current.t / anim.current.duration);
 
-      // easeInOutCubic — classic slow-start / fast-middle / slow-end
-      // curve. Reads as a deliberate pull-out, glide, and settle —
-      // the Google Earth feel rather than a constant-speed ramp.
-      const easePos = T < 0.5
-        ? 4 * T * T * T
-        : 1 - Math.pow(-2 * T + 2, 3) / 2;
-      // Target leads slightly so the star centers before the camera
-      // finishes arriving. easeOutQuad on a scaled T.
-      const Tt = Math.min(1, T * 1.35);
-      const easeTgt = 1 - (1 - Tt) * (1 - Tt);
+      // Two-phase motion — the sequencing user asked for:
+      //   Phase A (T=0 → ~0.5): camera holds position, only the
+      //     target lerps. Result: the camera "looks over" to the
+      //     destination before moving — a deliberate glance.
+      //   Phase B (T=0.45 → 1.0): camera glides in along the
+      //     Bezier arc toward the destination. Target is already
+      //     nearly locked by this point, so the motion feels like
+      //     a committed approach, not a wandering sweep.
+      //
+      // Target ease: easeInOutCubic on Tt = T * 2.0 (done at T=0.5).
+      // Symmetric curve — soft start, peak velocity around T=0.25,
+      // soft landing. No harsh flick at the start of rotation.
+      const Tt = Math.min(1, T * 2.0);
+      const easeTgt = Tt < 0.5
+        ? 4 * Tt * Tt * Tt
+        : 1 - Math.pow(-2 * Tt + 2, 3) / 2;
+
+      // Position ease: delay-then-approach. For the first 45% of
+      // the timeline the camera stays put (easePos=0). After that,
+      // normalized T_pos walks 0→1 over the remaining 55% of time
+      // and is shaped by easeInOutQuart — a softer, more gradual
+      // curve than cubic so the glide feels especially unhurried
+      // near the start and end.
+      const POS_DELAY = 0.45;
+      const T_pos = T < POS_DELAY ? 0 : (T - POS_DELAY) / (1 - POS_DELAY);
+      const easePos = T_pos < 0.5
+        ? 8 * T_pos * T_pos * T_pos * T_pos
+        : 1 - Math.pow(-2 * T_pos + 2, 4) / 2;
 
       // End target: the live position (for moving smalls) when
       // following, else the static dest. End camera position is that
