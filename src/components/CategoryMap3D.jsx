@@ -2336,11 +2336,272 @@ function NodeLabels({ items, mode, tier, focused, livePosRef = null }) {
   if (mode === "off") return null;
   return (
     <>
-      {visible.map((it, i) => (
-        <LiveLabel key={labelKeyFor(it, tier, i)} item={it} tier={tier}
-          focused={focused} livePosRef={livePosRef} />
-      ))}
+      {visible.map((it, i) => {
+        // FocusHologram owns the label for the focused element — skip
+        // the plain accent label so they don't stack.
+        if (focused && labelFocusMatch(it, tier, focused)) return null;
+        return (
+          <LiveLabel key={labelKeyFor(it, tier, i)} item={it} tier={tier}
+            focused={focused} livePosRef={livePosRef} />
+        );
+      })}
     </>
+  );
+}
+
+// computeFocusPairings — builds the category-grouped list of "things
+// this element pairs with" shown inside FocusHologram. Pulls from the
+// same layout helpers the edge system uses (midToAttrs / attrToMids /
+// bigAttrEdges / complement tables) so the hologram content is always
+// consistent with the lines drawn on screen — whatever the user sees
+// connected IS what the hologram enumerates.
+function computeFocusPairings(focused, layout) {
+  if (!focused) return [];
+  const out = [];
+
+  const pushByCat = (attrs, prefix) => {
+    if (!attrs || !attrs.length) return;
+    const byCat = new Map();
+    for (const { node, cat } of attrs) {
+      if (!cat) continue;
+      if (!byCat.has(cat.id)) byCat.set(cat.id, { label: cat.label, items: [] });
+      byCat.get(cat.id).items.push(node.label || node.name);
+    }
+    for (const [k, v] of byCat) {
+      out.push({ key: prefix + k, label: v.label, items: v.items });
+    }
+  };
+
+  if (focused.kind === "big") {
+    const children = layout.mids.filter(m => m.parent === focused.name);
+    if (children.length) {
+      out.push({
+        key: "children",
+        label: (layout.midLabel || "Children") + "s",
+        items: children.map(c => c.label || c.name).slice(0, 18),
+      });
+    }
+    if (layout.hasAttrs && layout.bigAttrEdges) {
+      pushByCat(layout.bigAttrEdges(focused), "attr-");
+    }
+  } else if (focused.kind === "mid") {
+    if (layout.hasAttrs && layout.midToAttrs) {
+      pushByCat(layout.midToAttrs(focused), "attr-");
+    }
+    if (layout.hasSmalls) {
+      const kids = layout.smalls.filter(s => s.parent === focused.name && s.grandparent === focused.parent);
+      if (kids.length) {
+        out.push({
+          key: "smalls",
+          label: (layout.smallLabel || "Micro") + "s",
+          items: kids.map(k => k.label || k.name).slice(0, 14),
+        });
+      }
+    }
+  } else if (focused.kind === "small") {
+    // Smalls inherit their parent mid's pairing profile.
+    const parentMid = layout.midsByKey?.[focused.parent + "/" + focused.grandparent]
+                 ||  layout.midsByKey?.[focused.parent]
+                 ||  layout.mids.find(x => x.name === focused.parent && (!focused.grandparent || x.parent === focused.grandparent));
+    if (parentMid && layout.hasAttrs && layout.midToAttrs) {
+      pushByCat(layout.midToAttrs(parentMid), "attr-");
+    }
+  } else if (focused.kind === "attribute") {
+    const cat = ATTR_CAT_BY_ID[focused.categoryId];
+    if (cat?.complTable && layout.data) {
+      const table = layout.data[cat.complTable] || {};
+      const entry = table[focused.name];
+      if (entry && typeof entry === "object") {
+        for (const [field, values] of Object.entries(entry)) {
+          const tgt = COMP_FIELD_TO_CAT[field];
+          if (!tgt || !Array.isArray(values)) continue;
+          const tgtCat = ATTR_CAT_BY_ID[tgt];
+          if (!tgtCat) continue;
+          out.push({
+            key: "compl-" + tgt,
+            label: tgtCat.label,
+            items: values.slice(0, 12),
+          });
+        }
+      }
+    }
+    if (layout.attrToMids) {
+      const users = layout.attrToMids(focused, 10) || [];
+      if (users.length) {
+        out.push({
+          key: "used-in",
+          label: "Used in " + (layout.midLabel || "entries"),
+          items: users.map(m => m.label || m.name),
+        });
+      }
+    }
+  }
+
+  return out;
+}
+
+// FocusHologram — holographic side-panel that floats next to the
+// focused element. Rendered instead of the normal accent label
+// (NodeLabels suppresses the focused item when this is active). Keeps
+// the panel anchored to the element's LIVE position every frame so
+// orbiting smalls don't leave the hologram behind.
+//
+// Visual language: matrix-film green on near-black, rectangular
+// monospace panel with neon edge glow, name typed out one character
+// at a time with a blinking caret — the cyberpunk HUD look the user
+// asked for. Pairings listed under the name as chip-style items,
+// grouped by attribute category.
+function FocusHologram({ focused, layout, livePosRef }) {
+  const groupRef = useRef();
+
+  useFrame(() => {
+    if (!focused || !groupRef.current) return;
+    let p = focused.pos;
+    if (livePosRef && focused.kind === "small" && focused.grandparent) {
+      const live = livePosRef.current.get(
+        focused.grandparent + "/" + focused.parent + "/" + focused.name
+      );
+      if (live) p = live;
+    }
+    if (p) groupRef.current.position.set(p[0], p[1], p[2]);
+  });
+
+  const pairings = useMemo(
+    () => computeFocusPairings(focused, layout),
+    [focused, layout],
+  );
+
+  const targetName = focused ? (focused.label || focused.name || "") : "";
+
+  // Typing animation — re-seeds every time targetName changes (new
+  // focus). CHAR_DELAY tuned so a ~20-char name finishes typing in
+  // under a second, matching the camera-fly-in pace.
+  const [displayedName, setDisplayedName] = useState("");
+  useEffect(() => {
+    setDisplayedName("");
+    if (!targetName) return;
+    let i = 0;
+    const CHAR_DELAY = 42;
+    const timer = setInterval(() => {
+      i++;
+      setDisplayedName(targetName.slice(0, i));
+      if (i >= targetName.length) clearInterval(timer);
+    }, CHAR_DELAY);
+    return () => clearInterval(timer);
+  }, [targetName]);
+
+  // Caret blink — independent of typing so it blinks during AND after
+  // the type-out.
+  const [caretOn, setCaretOn] = useState(true);
+  useEffect(() => {
+    const t = setInterval(() => setCaretOn(s => !s), 520);
+    return () => clearInterval(t);
+  }, []);
+
+  if (!focused || !focused.pos) return null;
+
+  const MATRIX      = "#39ff41";
+  const MATRIX_DIM  = "rgba(57,255,65,0.34)";
+  const MATRIX_SOFT = "rgba(57,255,65,0.08)";
+
+  return (
+    <group ref={groupRef}>
+      <Html center={false} distanceFactor={10} zIndexRange={[220, 120]}
+            style={{ pointerEvents: "none" }}>
+        <div style={{
+          position: "absolute",
+          // Offset up and to the right of the star so the star itself
+          // stays fully visible; the hologram reads as a HUD element
+          // attached to it, not a label covering it.
+          left: 34, top: -48,
+          minWidth: 240, maxWidth: 340,
+          padding: "14px 16px 13px",
+          background: "linear-gradient(180deg, rgba(0,18,6,0.93) 0%, rgba(0,8,2,0.89) 100%)",
+          border: `1px solid ${MATRIX}`,
+          borderRadius: 0,
+          boxShadow:
+            `0 0 12px rgba(57,255,65,0.42), ` +
+            `inset 0 0 22px rgba(57,255,65,0.09), ` +
+            `0 0 38px rgba(57,255,65,0.18)`,
+          color: MATRIX,
+          fontFamily: "ui-monospace, 'Geist Mono', 'SF Mono', Menlo, monospace",
+          userSelect: "none",
+        }}>
+          {/* Corner tick marks — four L-shapes at the panel corners.
+              Pure decoration, sells the HUD read. */}
+          {[
+            { top: -1,    left: -1,    borderTop: `2px solid ${MATRIX}`, borderLeft:  `2px solid ${MATRIX}` },
+            { top: -1,    right: -1,   borderTop: `2px solid ${MATRIX}`, borderRight: `2px solid ${MATRIX}` },
+            { bottom: -1, left: -1,    borderBottom: `2px solid ${MATRIX}`, borderLeft:  `2px solid ${MATRIX}` },
+            { bottom: -1, right: -1,   borderBottom: `2px solid ${MATRIX}`, borderRight: `2px solid ${MATRIX}` },
+          ].map((s, i) => (
+            <span key={i} style={{ position: "absolute", width: 8, height: 8, ...s }} />
+          ))}
+
+          {/* Name with type-out + blinking caret */}
+          <div style={{
+            fontSize: 17, fontWeight: 800, letterSpacing: "0.08em",
+            textTransform: "uppercase",
+            textShadow: `0 0 6px ${MATRIX}, 0 0 14px rgba(57,255,65,0.7)`,
+            minHeight: 22,
+            lineHeight: 1.2,
+            marginBottom: 10,
+            wordBreak: "break-word",
+          }}>
+            {displayedName}
+            <span style={{
+              display: "inline-block",
+              width: 9, height: 16,
+              marginLeft: 3, marginBottom: -2,
+              background: caretOn ? MATRIX : "transparent",
+              boxShadow: caretOn ? `0 0 6px ${MATRIX}` : "none",
+              verticalAlign: "baseline",
+            }} />
+          </div>
+
+          {/* Scanline separator */}
+          <div style={{
+            height: 1,
+            background: `linear-gradient(90deg, ${MATRIX} 0%, rgba(57,255,65,0.6) 40%, transparent 100%)`,
+            marginBottom: 10,
+            boxShadow: `0 0 4px ${MATRIX}`,
+          }} />
+
+          {/* Pairings grouped by category */}
+          {pairings.length === 0 ? (
+            <div style={{ fontSize: 10, opacity: 0.55, letterSpacing: "0.16em", textTransform: "uppercase" }}>
+              » no pairings indexed
+            </div>
+          ) : (
+            <div>
+              {pairings.map(group => (
+                <div key={group.key} style={{ marginBottom: 9 }}>
+                  <div style={{
+                    fontSize: 9, letterSpacing: "0.22em",
+                    opacity: 0.7, textTransform: "uppercase",
+                    marginBottom: 4,
+                  }}>
+                    » {group.label}
+                  </div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 3 }}>
+                    {group.items.map(item => (
+                      <span key={item} style={{
+                        padding: "1px 7px",
+                        border: `1px solid ${MATRIX_DIM}`,
+                        background: MATRIX_SOFT,
+                        fontSize: 10,
+                        lineHeight: 1.5,
+                        whiteSpace: "nowrap",
+                      }}>{item}</span>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </Html>
+    </group>
   );
 }
 
@@ -2448,7 +2709,25 @@ function CameraRig({ focusTarget, cameraGoto, controlsRef, animatingRef, syncAni
     const t = new THREE.Vector3(...p);
     destTgt.current.copy(t);
     const dist = focusTarget.kind === "big" ? 22 : focusTarget.kind === "mid" ? 9 : focusTarget.kind === "small" ? 4.5 : 8;
-    const dir = t.length() > 0.01 ? t.clone().normalize() : new THREE.Vector3(0, 0, 1);
+    // Approach direction: prefer the side of the target the camera
+    // is already on (continuity — no jarring teleport around the
+    // galaxy). Fall back to radial-outward when the camera is
+    // essentially on top of the target.
+    const dir = new THREE.Vector3().subVectors(camera.position, t);
+    if (dir.lengthSq() < 0.0001) {
+      dir.copy(t.lengthSq() > 0.01 ? t.clone().normalize() : new THREE.Vector3(0, 0, 1));
+    } else {
+      dir.normalize();
+    }
+    // Lift upward: the user explicitly doesn't want the camera
+    // parked below the target staring up (a common bad angle that
+    // hides the star behind its own label/glow). A 0.3 minimum y
+    // component means the camera is always at least ~17° above
+    // the target's horizon plane.
+    if (dir.y < 0.3) {
+      dir.y = 0.3;
+      dir.normalize();
+    }
     destPos.current.copy(t.clone().add(dir.multiplyScalar(dist)));
     setAnimating(true);
     if (followingRef) followingRef.current = true;
@@ -2469,11 +2748,21 @@ function CameraRig({ focusTarget, cameraGoto, controlsRef, animatingRef, syncAni
     // This fires for both focus (follow mode on) and reset (follow off).
     if (animatingRef?.current) {
       const hasLive = readLivePos();
-      const k = Math.min(1, dt * 2.8);
-      camera.position.lerp(destPos.current, k);
+      // Split rates: target chases the focus fast (~0.3s to orient),
+      // camera position glides in slower (~1.5s). The net effect is
+      // "lock the star in the center FIRST, then zoom in" — avoids
+      // the old behavior where camera and orientation swung together,
+      // which could read as a curved sideways dive instead of a
+      // clean approach. Ignored for non-focus gotos (Neural/Center)
+      // where followingRef is false — both rates stay moderate so
+      // those transitions feel snappy, not staged.
+      const isFocusFly = followingRef?.current === true;
+      const k_pos = Math.min(1, dt * (isFocusFly ? 2.2 : 2.8));
+      const k_tgt = Math.min(1, dt * (isFocusFly ? 6.5 : 2.8));
+      camera.position.lerp(destPos.current, k_pos);
       if (controlsRef.current) {
         const goal = hasLive && followingRef?.current ? liveTgt.current : destTgt.current;
-        controlsRef.current.target.lerp(goal, k);
+        controlsRef.current.target.lerp(goal, k_tgt);
         controlsRef.current.update();
       }
       // Converged? Stop the lerp. If we're following, the steady-follow
@@ -2624,7 +2913,7 @@ function FreeFlightNav({ controlsRef, keysDownRef, syncAnimating, releaseFollow 
 // After each move we re-anchor controls.target to a point directly
 // in front of the camera at the same distance it was before, so
 // OrbitControls' wheel-dolly and autoRotate still feel consistent.
-function FpsDragView({ controlsRef, releaseFollow, syncAnimating, onInteractingChange }) {
+function FpsDragView({ controlsRef, releaseFollow, syncAnimating, onInteractingChange, focusedRef }) {
   const { camera, gl } = useThree();
   const draggingRef = useRef(null);
   const eulerRef    = useRef(new THREE.Euler(0, 0, 0, "YXZ"));
@@ -2633,18 +2922,30 @@ function FpsDragView({ controlsRef, releaseFollow, syncAnimating, onInteractingC
     const el = gl.domElement;
     if (!el) return;
 
+    // Scratch vectors/spherical reused per pointer event — orbit mode
+    // runs every move, allocating a Spherical per tick showed up in
+    // profiler as measurable GC pressure.
     const forward = new THREE.Vector3();
+    const orbitOffset = new THREE.Vector3();
+    const orbitSpherical = new THREE.Spherical();
 
     const onDown = (e) => {
       // Left button only — middle (wheel dolly) and right (nothing)
       // pass through to OrbitControls untouched.
       if (e.button !== 0 && e.pointerType !== "touch") return;
-      // Seed euler from the camera's current orientation so the drag
-      // continues smoothly from wherever they were looking, no jump.
+      // Seed euler from the camera's current orientation so an FPS
+      // drag continues smoothly from wherever they were looking, no
+      // jump. Safe to do unconditionally — orbit mode doesn't use it.
       eulerRef.current.setFromQuaternion(camera.quaternion, "YXZ");
       draggingRef.current = { sx: e.clientX, sy: e.clientY };
       try { el.setPointerCapture(e.pointerId); } catch {}
-      if (releaseFollow) releaseFollow();
+      // Release follow ONLY in FPS mode. In orbit mode (focused) we
+      // want CameraRig to keep tracking a moving target so the user's
+      // orbit angle stays locked to the star as it orbits its parent.
+      const focused = focusedRef?.current;
+      if (!focused?.pos) {
+        if (releaseFollow) releaseFollow();
+      }
       if (syncAnimating) syncAnimating(false);
       if (onInteractingChange) onInteractingChange(true);
     };
@@ -2661,15 +2962,45 @@ function FpsDragView({ controlsRef, releaseFollow, syncAnimating, onInteractingC
 
       const SENS = 0.004;   // radians per pixel — close to 1:1 feel
 
+      const focused = focusedRef?.current;
+
+      if (focused?.pos) {
+        // ── Orbit mode ──────────────────────────────────────────────
+        // Camera pivots around controls.target (the focused star).
+        // CameraRig has already lerped target onto the star and, if
+        // it's a moving small, keeps it on the live position every
+        // frame — we just rotate our offset around it.
+        orbitOffset.copy(camera.position).sub(controls.target);
+        const r = orbitOffset.length();
+        if (r < 0.01) return;  // degenerate — can't orbit a zero radius
+        orbitSpherical.setFromVector3(orbitOffset);
+        orbitSpherical.theta -= dx * SENS;
+        // Elevation clamped well off the poles (±81° max). Past that
+        // the camera would stare straight down through the star from
+        // above or up through it from below — the exact "bad angle"
+        // the user said they don't want.
+        const ORBIT_PHI_LIMIT = 0.16;
+        orbitSpherical.phi = Math.max(
+          ORBIT_PHI_LIMIT,
+          Math.min(Math.PI - ORBIT_PHI_LIMIT, orbitSpherical.phi - dy * SENS),
+        );
+        orbitOffset.setFromSpherical(orbitSpherical);
+        camera.position.copy(controls.target).add(orbitOffset);
+        camera.lookAt(controls.target);
+        // Keep Euler in sync so a subsequent unfocused FPS drag (user
+        // clicks Exit Focus mid-session) doesn't jump on first move.
+        eulerRef.current.setFromQuaternion(camera.quaternion, "YXZ");
+        return;
+      }
+
+      // ── FPS mode ──────────────────────────────────────────────────
       // Accumulate yaw on .y (around world-up) and pitch on .x.
       // Yaw wraps freely; pitch is clamped just shy of ±90° to keep
       // the camera out of the gimbal zone. Past ±90° the YXZ Euler
       // flips the camera upside-down AND OrbitControls.update()'s
       // built-in camera.lookAt(target) starts fighting our quaternion
       // every frame (its cross(up, z) goes degenerate), which reads
-      // as the galaxy tumbling/spazzing. 88.8° is functionally
-      // unlimited — you can look nearly straight up/down — without
-      // ever entering that degenerate zone.
+      // as the galaxy tumbling/spazzing.
       const PITCH_LIMIT = Math.PI / 2 - 0.02;
       eulerRef.current.y -= dx * SENS;
       eulerRef.current.x = Math.max(
@@ -2703,7 +3034,7 @@ function FpsDragView({ controlsRef, releaseFollow, syncAnimating, onInteractingC
       el.removeEventListener("pointerup",     onUp);
       el.removeEventListener("pointercancel", onUp);
     };
-  }, [gl, camera, controlsRef, releaseFollow, syncAnimating, onInteractingChange]);
+  }, [gl, camera, controlsRef, releaseFollow, syncAnimating, onInteractingChange, focusedRef]);
 
   return null;
 }
@@ -3623,60 +3954,6 @@ function LayerPanel({
   );
 }
 
-function FlightKeysHUD({ pressedKeys }) {
-  // Compact keypad showing the 6 flight keys with active ones lit in
-  // the accent color. Doubles as a keyboard-hit diagnostic: if nothing
-  // lights up when you press W, the listener isn't catching events.
-  // If W lights up but the camera doesn't move, the issue is in the
-  // nav component. The SHIFT pill lights when boost is active.
-  const active = new Set(pressedKeys.split(","));
-  const Key = ({ k, label }) => {
-    const on = active.has(k);
-    return (
-      <div style={{
-        width: 28, height: 28, borderRadius: 5,
-        display: "flex", alignItems: "center", justifyContent: "center",
-        fontSize: 12, fontFamily: T.fontMono, fontWeight: 700,
-        color: on ? "#fff" : T.textMuted,
-        background: on ? T.accent : "rgba(255,255,255,0.05)",
-        border: `1px solid ${on ? T.accent : "rgba(255,255,255,0.14)"}`,
-        boxShadow: on ? "0 0 12px rgba(94,106,210,0.55)" : "none",
-        transition: "background 80ms, color 80ms, border-color 80ms, box-shadow 80ms",
-      }}>{label || k.toUpperCase()}</div>
-    );
-  };
-  const shiftOn = active.has("shift");
-  return (
-    <div style={{
-      position: "absolute", bottom: 60, left: "50%", transform: "translateX(-50%)",
-      zIndex: 15, display: "flex", alignItems: "center", gap: 10,
-      background: "rgba(10,10,15,0.82)",
-      border: `1px solid ${T.borderHi}`,
-      padding: "8px 12px",
-      borderRadius: T.r_md, userSelect: "none", pointerEvents: "none",
-    }}>
-      <div style={{ display: "flex", gap: 4 }}>
-        <Key k="w" /><Key k="a" /><Key k="s" /><Key k="d" />
-      </div>
-      <div style={{ width: 1, height: 22, background: "rgba(255,255,255,0.12)" }} />
-      <div style={{ display: "flex", gap: 4 }}>
-        <Key k="z" /><Key k="x" />
-      </div>
-      <div style={{ width: 1, height: 22, background: "rgba(255,255,255,0.12)" }} />
-      <div style={{
-        fontFamily: T.fontMono, fontSize: 9, fontWeight: 700,
-        letterSpacing: ".06em",
-        padding: "5px 8px", borderRadius: 4,
-        color: shiftOn ? "#fff" : T.textMuted,
-        background: shiftOn ? T.accent : "rgba(255,255,255,0.05)",
-        border: `1px solid ${shiftOn ? T.accent : "rgba(255,255,255,0.14)"}`,
-        boxShadow: shiftOn ? "0 0 12px rgba(94,106,210,0.55)" : "none",
-        transition: "background 80ms, color 80ms, border-color 80ms, box-shadow 80ms",
-      }}>SHIFT · BOOST</div>
-    </div>
-  );
-}
-
 function FocusHUD({ focused, layout }) {
   if (!focused) return (
     <div style={{
@@ -3742,7 +4019,7 @@ function CenterButton({ onCenter }) {
       }}
     >
       <span style={{ fontSize: 15, lineHeight: 1 }}>⊙</span>
-      <span>center</span>
+      <span>Dive in</span>
     </div>
   );
 }
@@ -3962,6 +4239,12 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
     attributes: layout.hasAttrs,
   });
   const [focused, setFocused] = useState(null);
+  // focusedRef mirrors the focused state so FpsDragView can read the
+  // current focus inside pointer handlers without rebuilding its
+  // listeners on every focus change. Updated in a layout effect so the
+  // handlers always see the latest value.
+  const focusedRef = useRef(null);
+  useEffect(() => { focusedRef.current = focused; }, [focused]);
   const [hovered, setHovered] = useState(null);
   const [hoveredEdgeIdx, setHoveredEdgeIdx] = useState(-1);      // index into focus-lines
   const [hoveredAllEdgeIdx, setHoveredAllEdgeIdx] = useState(-1); // index into allEdges
@@ -4033,13 +4316,11 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
   // originating in inputs / textareas / contenteditable regions so
   // typing into the search or filter boxes doesn't drift the camera.
   //
-  // A parallel React-state mirror (`pressedKeys`) drives the tiny
-  // on-screen controls legend. Without this mirror the overlay can't
-  // know the ref changed (React doesn't observe refs). Keeping them
-  // paired lets the ref stay the per-frame read source and the state
-  // drive the visual feedback.
+  // keyboardMoveRef is the per-frame read source FreeFlightNav uses.
+  // A React-state mirror used to drive an on-screen HUD legend, but
+  // the user asked for the HUD to be removed — the ref alone is
+  // sufficient for the flight logic.
   const keyboardMoveRef = useRef(new Set());
-  const [pressedKeys, setPressedKeys] = useState("");
   const rootDivRef = useRef(null);
   const CODE_TO_KEY_MAP = useMemo(() => ({
     KeyW: "w", KeyA: "a", KeyS: "s", KeyD: "d", KeyX: "x", KeyZ: "z",
@@ -4053,19 +4334,11 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
     const tag = (t.tagName || "").toLowerCase();
     return tag === "input" || tag === "textarea" || t.isContentEditable;
   };
-  // Comma-separated join so the multi-char "shift" token doesn't bleed
-  // into single-char matches (without this, pressing Shift alone would
-  // light up S/H/I/F/T on the HUD).
-  const syncPressedKeys = () => {
-    setPressedKeys([...keyboardMoveRef.current].sort().join(","));
-  };
   const flightKeyDown = (e) => {
     if (isTextTarget(e.target)) return;
     const mapped = CODE_TO_KEY_MAP[e.code];
     if (!mapped) return;
-    const before = keyboardMoveRef.current.size;
     keyboardMoveRef.current.add(mapped);
-    if (keyboardMoveRef.current.size !== before) syncPressedKeys();
     // Shift has other meanings in the UI (Shift+click, etc.) — don't
     // preventDefault on it. The movement keys are safe to preventDefault.
     if (mapped !== "shift") e.preventDefault();
@@ -4082,18 +4355,10 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
   };
   const flightKeyUp = (e) => {
     const mapped = CODE_TO_KEY_MAP[e.code];
-    if (mapped && keyboardMoveRef.current.has(mapped)) {
-      keyboardMoveRef.current.delete(mapped);
-      syncPressedKeys();
-    }
+    if (mapped) keyboardMoveRef.current.delete(mapped);
   };
   useEffect(() => {
-    const onBlur = () => {
-      if (keyboardMoveRef.current.size > 0) {
-        keyboardMoveRef.current.clear();
-        syncPressedKeys();
-      }
-    };
+    const onBlur = () => { keyboardMoveRef.current.clear(); };
     // Capture-phase on window + document so any upstream handler that
     // stopPropagation()s on a bubble-phase listener can't starve us.
     // Belt and suspenders after the user reported that keys weren't
@@ -5072,6 +5337,7 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
           />}
 
           <HoverTooltip hovered={hovered} focused={focused} livePosRef={livePosRef} />
+          <FocusHologram focused={focused} layout={layout} livePosRef={livePosRef} />
         </Suspense>
 
         <OrbitControls
@@ -5100,8 +5366,8 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
           // dolly and wheel zoom now.
           mouseButtons={{ LEFT: null, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: null }}
         />
-        <AutoSpinAroundY active={autoRotate && !interacting && !cameraAnimating} rotateSpeed={rotateSpeed} controlsRef={controlsRef} />
-        <FpsDragView controlsRef={controlsRef} releaseFollow={releaseCameraFollow} syncAnimating={syncCameraAnimating} onInteractingChange={setInteracting} />
+        <AutoSpinAroundY active={autoRotate && !interacting && !cameraAnimating && !focused} rotateSpeed={rotateSpeed} controlsRef={controlsRef} />
+        <FpsDragView controlsRef={controlsRef} releaseFollow={releaseCameraFollow} syncAnimating={syncCameraAnimating} onInteractingChange={setInteracting} focusedRef={focusedRef} />
         <CameraRig focusTarget={focused} cameraGoto={cameraGoto} controlsRef={controlsRef} animatingRef={cameraAnimatingRef} syncAnimating={syncCameraAnimating} followingRef={cameraFollowingRef} livePosRef={livePosRef} />
         <FreeFlightNav controlsRef={controlsRef} keysDownRef={keyboardMoveRef} syncAnimating={syncCameraAnimating} releaseFollow={releaseCameraFollow} />
       </Canvas>
@@ -5132,7 +5398,6 @@ export default function CategoryMap3D({ categoryId = "genres", data }) {
         canRandom={canRandomize}
       />
       <FocusHUD focused={focused} layout={layout} />
-      <FlightKeysHUD pressedKeys={pressedKeys} />
       {copyToast && (
         <div
           key={copyToast.t}
